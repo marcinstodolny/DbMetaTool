@@ -1,0 +1,6 @@
+CREATE TABLE "LOAN"
+(
+  "BOOK_ID" "D_ID",
+  "MEMBER_ID" "D_ID",
+  "LOANED_AT" TIMESTAMP
+)

@@ -232,7 +232,7 @@ public class FirebirdUpdater
         if (string.IsNullOrWhiteSpace(sqlToExecute))
             return (true, null);
 
-        using var transaction = connection.BeginTransaction();
+        using var transaction = BeginWaitTransaction(connection);
         try
         {
             using var command = connection.CreateCommand();
@@ -260,7 +260,7 @@ public class FirebirdUpdater
         FbConnection connection,
         IReadOnlyList<string> statements)
     {
-        using var transaction = connection.BeginTransaction();
+        using var transaction = BeginWaitTransaction(connection);
         try
         {
             foreach (var statement in statements)
@@ -437,5 +437,18 @@ public class FirebirdUpdater
         }
 
         return result;
+    }
+
+    private static FbTransaction BeginWaitTransaction(FbConnection connection)
+    {
+        var transactionOptions = new FbTransactionOptions
+        {
+            TransactionBehavior =
+                FbTransactionBehavior.Concurrency |
+                FbTransactionBehavior.Write |
+                FbTransactionBehavior.Wait
+        };
+
+        return connection.BeginTransaction(transactionOptions);
     }
 }

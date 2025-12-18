@@ -97,8 +97,7 @@ namespace DbMetaTool
         {
             Directory.CreateDirectory(outputDirectory);
 
-            using var connection = new FirebirdSql.Data.FirebirdClient.FbConnection(connectionString);
-            connection.Open();
+            using var connection = Helpers.CreateAndOpenConnection(connectionString);
 
             var firebirdExporter = new FirebirdExporter();
 
@@ -113,8 +112,8 @@ namespace DbMetaTool
         /// </summary>
         public static void UpdateDatabase(string connectionString, string scriptsDirectory)
         {
-            using var connection = new FirebirdSql.Data.FirebirdClient.FbConnection(connectionString);
-            connection.Open();
+            using var connection = Helpers.CreateAndOpenConnection(connectionString);
+
             var firebirdUpdater = new FirebirdUpdater();
 
             foreach (var group in ScriptGroupInfo.ExecutionOrder)

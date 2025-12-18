@@ -44,4 +44,18 @@ public static class Helpers
         }
     }
 
+    public static FbConnection CreateAndOpenConnection(string connectionString)
+    {
+        var connection = new FbConnection(connectionString);
+        try
+        {
+            connection.Open();
+            return connection;
+        }
+        catch (FbException exception)
+        {
+            connection.Dispose();
+            throw new InvalidOperationException($"nie udało się otworzyć połączenia (sprawdź connection string).", exception);
+        }
+    }
 }

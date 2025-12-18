@@ -255,7 +255,7 @@ public class FirebirdExporter
 
     public void Report()
     {
-        Console.WriteLine($"Exported count:");
+        Console.WriteLine($"Raport EXPORT-SCRIPTS");
         Console.WriteLine($"Domains: {_domainsExported}");
         Console.WriteLine($"Tables: {_tablesExported}");
         Console.WriteLine($"Procedures: {_proceduresExported}");

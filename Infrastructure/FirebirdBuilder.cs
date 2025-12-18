@@ -31,8 +31,7 @@ public static class FirebirdBuilder
         var failures = new List<(string File, string Error)>();
         var executedOk = 0;
 
-        using var connection = new FbConnection(connectionString);
-        connection.Open();
+        using var connection = Helpers.CreateAndOpenConnection(connectionString);
 
         using var transaction = connection.BeginTransaction();
 
@@ -40,8 +39,6 @@ public static class FirebirdBuilder
         {
             var groupDirectory = Path.Combine(scriptsDirectory, scriptGroup.GetFolderName());
             var groupFiles = Helpers.GetSqlFiles(groupDirectory);
-
-            Console.WriteLine($"Wykonywanie: {scriptGroup.GetFolderName()} ({groupFiles.Count} plików)");
 
             foreach (var filePath in groupFiles)
             {
@@ -71,7 +68,7 @@ public static class FirebirdBuilder
         Console.WriteLine();
         Console.WriteLine("RAPORT BUILD-DB");
         Console.WriteLine($"DB: {databaseFilePath}");
-        Console.WriteLine($"OK: {executedOk}");
+        Console.WriteLine($"Wykonane: {executedOk}");
         Console.WriteLine($"Błędy: {failures.Count}");
 
         if (failures.Count <= 0) return;

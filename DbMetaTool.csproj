@@ -11,4 +11,10 @@
     <PackageReference Include="FirebirdSql.Data.FirebirdClient" Version="10.3.4" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="Examples\Library\domains\" />
+    <Folder Include="Examples\Library\procedures\" />
+    <Folder Include="Examples\Library\tables\" />
+  </ItemGroup>
+
 </Project>
