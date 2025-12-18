@@ -80,12 +80,13 @@ namespace DbMetaTool
         /// </summary>
         public static void BuildDatabase(string databaseDirectory, string scriptsDirectory)
         {
-            // TODO:
-            // 1) Utwórz pustą bazę danych FB 5.0 w katalogu databaseDirectory.
-            // 2) Wczytaj i wykonaj kolejno skrypty z katalogu scriptsDirectory
-            //    (tylko domeny, tabele, procedury).
-            // 3) Obsłuż błędy i wyświetl raport.
-            throw new NotImplementedException();
+            var databaseFilePath = Path.Combine(databaseDirectory, "database.fdb");
+            var connectionString = FirebirdBuilder.BuildConnectionString(databaseDirectory, databaseFilePath);
+
+            FirebirdBuilder.CreateDatabase(connectionString, databaseDirectory, databaseFilePath);
+            var applyResult = FirebirdBuilder.ApplyScripts(connectionString, scriptsDirectory);
+
+            FirebirdBuilder.Report(databaseFilePath, applyResult.executedOk, applyResult.failures);
         }
 
         /// <summary>
