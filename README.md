@@ -23,12 +23,12 @@ Aplikacja oczekuje katalogu ze skryptami w strukturze:
 ```
 
 scripts/
-domains/
-*.sql
-tables/
-*.sql
-procedures/
-*.sql
+  domains/
+    *.sql
+  tables/
+    *.sql
+  procedures/
+    *.sql
 
 ````
 
