@@ -85,6 +85,8 @@ namespace DbMetaTool
 
             FirebirdBuilder.CreateDatabase(connectionString, databaseDirectory, databaseFilePath);
             var applyResult = FirebirdBuilder.ApplyScripts(connectionString, scriptsDirectory);
+
+            FirebirdBuilder.Report(databaseFilePath, applyResult.executedOk, applyResult.failures);
         }
 
         /// <summary>

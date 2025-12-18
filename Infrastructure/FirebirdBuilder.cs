@@ -77,6 +77,46 @@ public static class FirebirdBuilder
         return (executedOk, failures);
     }
 
+    public static void Report(string databaseFilePath, int executedOk, List<(string File, string Error)> failures)
+    {
+        Console.WriteLine();
+        Console.WriteLine("RAPORT BUILD-DB");
+        Console.WriteLine($"DB: {databaseFilePath}");
+        Console.WriteLine($"OK: {executedOk}");
+        Console.WriteLine($"Błędy: {failures.Count}");
+
+        if (failures.Count <= 0) return;
+
+        Console.WriteLine();
+        Console.WriteLine("Szczegóły błędów:");
+        foreach (var failure in failures)
+        {
+            Console.WriteLine("- Plik: " + failure.File);
+            Console.WriteLine("  Błąd: " + failure.Error);
+        }
+        throw new Exception("Build-db przerwany: wystąpiły błędy w skryptach.");
+    }
+
+    private static string NormalizeSqlForAdo(string sqlText)
+    {
+        var trimmed = sqlText.Trim();
+
+        if (trimmed.EndsWith(';'))
+            trimmed = trimmed[..^1].TrimEnd();
+
+        return trimmed;
+    }
+
+    private static List<string> GetSqlFiles(string directoryPath)
+    {
+        if (!Directory.Exists(directoryPath))
+            return [];
+
+        return Directory.GetFiles(directoryPath, "*.sql", SearchOption.TopDirectoryOnly)
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static void InvokeFbCreateDatabase(string connectionString, bool overwrite)
     {
         var fbConnectionType = typeof(FirebirdSql.Data.FirebirdClient.FbConnection);
@@ -141,26 +181,6 @@ public static class FirebirdBuilder
         );
 
         throw new InvalidOperationException("Nie znaleziono pasującego overloadu CreateDatabase. Dostępne:\n" + available);
-    }
-
-    private static string NormalizeSqlForAdo(string sqlText)
-    {
-        var trimmed = sqlText.Trim();
-
-        if (trimmed.EndsWith(';'))
-            trimmed = trimmed[..^1].TrimEnd();
-
-        return trimmed;
-    }
-
-    private static List<string> GetSqlFiles(string directoryPath)
-    {
-        if (!Directory.Exists(directoryPath))
-            return [];
-
-        return Directory.GetFiles(directoryPath, "*.sql", SearchOption.TopDirectoryOnly)
-            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
-            .ToList();
     }
 
     private static (bool Success, string? ErrorMessage) ExecuteSingleStatement(
