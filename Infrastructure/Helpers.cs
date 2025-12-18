@@ -28,7 +28,10 @@ public static class Helpers
     {
 
         var user = Environment.GetEnvironmentVariable("FB_USER") ?? "SYSDBA";
-        var password = Environment.GetEnvironmentVariable("FB_PASSWORD") ?? "masterkey";
+        var password = Environment.GetEnvironmentVariable("FB_PASSWORD");
+        if (string.IsNullOrWhiteSpace(password))
+            throw new InvalidOperationException("FB_PASSWORD is not set. Set environment variable FB_PASSWORD before running build-db.");
+
         var host = Environment.GetEnvironmentVariable("FB_HOST") ?? "localhost";
 
         return $"User={user};Password={password};Database={databaseFilePath};DataSource={host};Dialect=3;Charset=UTF8;";
