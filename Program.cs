@@ -117,7 +117,8 @@ namespace DbMetaTool
             using var connection = new FirebirdSql.Data.FirebirdClient.FbConnection(connectionString);
             connection.Open();
 
-            FirebirdUpdater.UpdateDomains(scriptsDirectory, connection);
+            FirebirdUpdater.UpdateGroup(scriptsDirectory, connection, GroupName.Domain);
+            FirebirdUpdater.UpdateGroup(scriptsDirectory, connection, GroupName.Table);
         }
     }
 }

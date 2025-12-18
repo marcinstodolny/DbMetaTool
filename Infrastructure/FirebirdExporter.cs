@@ -7,7 +7,7 @@ public static class FirebirdExporter
     public static int ExportDomains(FbConnection connection, string outputDirectory)
     {
         EnsureOpen(connection);
-        var domainsDirectory = Path.Combine(outputDirectory, "domains");
+        var domainsDirectory = Path.Combine(outputDirectory, GroupName.Domain.Value);
         Directory.CreateDirectory(domainsDirectory);
         
         var domainExported = 0;
@@ -61,7 +61,7 @@ public static class FirebirdExporter
     public static int ExportTablesWithColumns(FbConnection connection, string outputDirectory)
     {
         EnsureOpen(connection);
-        var tablesDirectory = Path.Combine(outputDirectory, "tables");
+        var tablesDirectory = Path.Combine(outputDirectory, GroupName.Table.Value);
         Directory.CreateDirectory(tablesDirectory);
         var tablesExported = 0;
         const string tablesQuery = @"
@@ -153,7 +153,7 @@ public static class FirebirdExporter
     public static int ExportProcedures(FbConnection connection, string outputDirectory)
     {
         EnsureOpen(connection);
-        var proceduresDirectory = Path.Combine(outputDirectory, "procedures");
+        var proceduresDirectory = Path.Combine(outputDirectory, GroupName.Procedure.Value);
         Directory.CreateDirectory(proceduresDirectory);
 
         var proceduresExported = 0;
