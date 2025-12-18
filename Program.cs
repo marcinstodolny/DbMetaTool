@@ -1,5 +1,4 @@
-﻿using System;
-using System.IO;
+﻿using DbMetaTool.Infrastructure;
 
 namespace DbMetaTool
 {
@@ -94,11 +93,19 @@ namespace DbMetaTool
         /// </summary>
         public static void ExportScripts(string connectionString, string outputDirectory)
         {
-            // TODO:
-            // 1) Połącz się z bazą danych przy użyciu connectionString.
-            // 2) Pobierz metadane domen, tabel (z kolumnami) i procedur.
-            // 3) Wygeneruj pliki .sql / .json / .txt w outputDirectory.
-            throw new NotImplementedException();
+            Directory.CreateDirectory(outputDirectory);
+
+            using var connection = new FirebirdSql.Data.FirebirdClient.FbConnection(connectionString);
+            connection.Open();
+
+            var domainsExported = FirebirdExporter.ExportDomains(connection, outputDirectory);
+            var tablesExported = FirebirdExporter.ExportTablesWithColumns(connection, outputDirectory);
+            var proceduresExported = FirebirdExporter.ExportProcedures(connection, outputDirectory);
+
+            Console.WriteLine($"Exported count:");
+            Console.WriteLine($"Domains: {domainsExported}");
+            Console.WriteLine($"Tables: {tablesExported}");
+            Console.WriteLine($"Procedures: {proceduresExported}");
         }
 
         /// <summary>
