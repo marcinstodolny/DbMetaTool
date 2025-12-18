@@ -34,6 +34,49 @@ public static class FirebirdBuilder
         }
     }
 
+    public static (int executedOk, List<(string File, string Error)> failures) ApplyScripts(string connectionString, string scriptsDirectory)
+    {
+        var domainsDir = Path.Combine(scriptsDirectory, "domains");
+        var tablesDir = Path.Combine(scriptsDirectory, "tables");
+        var proceduresDir = Path.Combine(scriptsDirectory, "procedures");
+
+        var domainFiles = GetSqlFiles(domainsDir);
+        var tableFiles = GetSqlFiles(tablesDir);
+        var procedureFiles = GetSqlFiles(proceduresDir);
+
+        var failures = new List<(string File, string Error)>();
+        var executedOk = 0;
+
+        using (var connection = new FirebirdSql.Data.FirebirdClient.FbConnection(connectionString))
+        {
+            connection.Open();
+
+            void ExecuteGroup(string groupName, IReadOnlyList<string> files)
+            {
+                Console.WriteLine($"Wykonywanie: {groupName} ({files.Count} plików)");
+
+                foreach (var filePath in files)
+                {
+                    var result = ExecuteSingleStatement(connection, filePath);
+                    if (result.Success)
+                    {
+                        executedOk++;
+                        continue;
+                    }
+
+                    failures.Add((filePath, result.ErrorMessage ?? "Nieznany błąd"));
+                    break;
+                }
+            }
+
+            ExecuteGroup("domains", domainFiles);
+            if (failures.Count == 0) ExecuteGroup("tables", tableFiles);
+            if (failures.Count == 0) ExecuteGroup("procedures", procedureFiles);
+        }
+
+        return (executedOk, failures);
+    }
+
     private static void InvokeFbCreateDatabase(string connectionString, bool overwrite)
     {
         var fbConnectionType = typeof(FirebirdSql.Data.FirebirdClient.FbConnection);
@@ -98,5 +141,53 @@ public static class FirebirdBuilder
         );
 
         throw new InvalidOperationException("Nie znaleziono pasującego overloadu CreateDatabase. Dostępne:\n" + available);
+    }
+
+    private static string NormalizeSqlForAdo(string sqlText)
+    {
+        var trimmed = sqlText.Trim();
+
+        if (trimmed.EndsWith(';'))
+            trimmed = trimmed[..^1].TrimEnd();
+
+        return trimmed;
+    }
+
+    private static List<string> GetSqlFiles(string directoryPath)
+    {
+        if (!Directory.Exists(directoryPath))
+            return [];
+
+        return Directory.GetFiles(directoryPath, "*.sql", SearchOption.TopDirectoryOnly)
+            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static (bool Success, string? ErrorMessage) ExecuteSingleStatement(
+        FirebirdSql.Data.FirebirdClient.FbConnection connection,
+        string filePath)
+    {
+        var sql = File.ReadAllText(filePath);
+        sql = NormalizeSqlForAdo(sql);
+
+        if (string.IsNullOrWhiteSpace(sql))
+            return (true, null);
+
+        try
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.CommandType = System.Data.CommandType.Text;
+            command.ExecuteNonQuery();
+            return (true, null);
+        }
+        catch (FirebirdSql.Data.FirebirdClient.FbException fbEx)
+        {
+            return (false, fbEx.Message);
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
     }
 }
