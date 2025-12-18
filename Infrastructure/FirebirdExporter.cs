@@ -4,13 +4,15 @@ namespace DbMetaTool.Infrastructure;
 
 public static class FirebirdExporter
 {
-    public static int ExportDomains(FbConnection connection, string outputDirectory)
+    private static int _domainsExported; 
+    private static int _tablesExported;
+    private static int _proceduresExported;
+    public static void ExportDomains(FbConnection connection, string outputDirectory)
     {
         EnsureOpen(connection);
         var domainsDirectory = Path.Combine(outputDirectory, GroupName.Domain.Value);
         Directory.CreateDirectory(domainsDirectory);
         
-        var domainExported = 0;
         const string domainQuery = @"
             SELECT
                 f.RDB$FIELD_NAME            AS DOMAIN_NAME,
@@ -53,17 +55,15 @@ public static class FirebirdExporter
 
             var filePath = Path.Combine(domainsDirectory, SanitizeFileName(domainName) + ".sql");
             File.WriteAllText(filePath, createSql.Trim() + Environment.NewLine);
-            domainExported++;
+            _domainsExported++;
         }
-        return domainExported;
     }
 
-    public static int ExportTablesWithColumns(FbConnection connection, string outputDirectory)
+    public static void ExportTablesWithColumns(FbConnection connection, string outputDirectory)
     {
         EnsureOpen(connection);
         var tablesDirectory = Path.Combine(outputDirectory, GroupName.Table.Value);
         Directory.CreateDirectory(tablesDirectory);
-        var tablesExported = 0;
         const string tablesQuery = @"
             SELECT TRIM(r.RDB$RELATION_NAME) AS TABLE_NAME
             FROM RDB$RELATIONS r
@@ -145,18 +145,16 @@ public static class FirebirdExporter
             var filePath = Path.Combine(tablesDirectory, SanitizeFileName(tableName) + ".sql");
             File.WriteAllText(filePath, createTableSql.Trim() + Environment.NewLine);
 
-            tablesExported++;
+            _tablesExported++;
         }
-        return tablesExported;
     }
 
-    public static int ExportProcedures(FbConnection connection, string outputDirectory)
+    public static void ExportProcedures(FbConnection connection, string outputDirectory)
     {
         EnsureOpen(connection);
         var proceduresDirectory = Path.Combine(outputDirectory, GroupName.Procedure.Value);
         Directory.CreateDirectory(proceduresDirectory);
 
-        var proceduresExported = 0;
         const string proceduresQuery = @"
         SELECT
             TRIM(p.RDB$PROCEDURE_NAME)  AS PROC_NAME,
@@ -251,10 +249,16 @@ public static class FirebirdExporter
             var filePath = Path.Combine(proceduresDirectory, SanitizeFileName(procedureName) + ".sql");
             File.WriteAllText(filePath, finalSql.Trim() + Environment.NewLine);
 
-            proceduresExported++;
+            _proceduresExported++;
         }
+    }
 
-        return proceduresExported;
+    public static void Report()
+    {
+        Console.WriteLine($"Exported count:");
+        Console.WriteLine($"Domains: {_domainsExported}");
+        Console.WriteLine($"Tables: {_tablesExported}");
+        Console.WriteLine($"Procedures: {_proceduresExported}");
     }
 
     private static void EnsureOpen(FbConnection connection)
@@ -267,22 +271,22 @@ public static class FirebirdExporter
         }
     }
 
-    static string TrimFbString(object value)
+    private static string TrimFbString(object value)
         => value == DBNull.Value ? string.Empty : Convert.ToString(value)!.Trim();
 
-    static int? ReadNullableInt(object value)
+    private static int? ReadNullableInt(object value)
         => value == DBNull.Value ? null : Convert.ToInt32(value);
 
-    static short? ReadNullableInt16(object value)
+    private static short? ReadNullableInt16(object value)
         => value == DBNull.Value ? null : Convert.ToInt16(value);
 
-    static bool StartsWithRdb(string identifier)
+    private static bool StartsWithRdb(string identifier)
         => identifier.StartsWith("RDB$", StringComparison.OrdinalIgnoreCase);
 
-    static string QuoteIdentifier(string identifier)
+    private static string QuoteIdentifier(string identifier)
         => "\"" + identifier.Replace("\"", "\"\"") + "\"";
 
-    static string SanitizeFileName(string name)
+    private static string SanitizeFileName(string name)
     {
         var invalidChars = Path.GetInvalidFileNameChars();
         var result = name;
@@ -291,7 +295,7 @@ public static class FirebirdExporter
         return result;
     }
 
-    static string BuildTypeSql(
+    private static string BuildTypeSql(
         short fieldType,
         short? fieldSubType,
         int? fieldLength,

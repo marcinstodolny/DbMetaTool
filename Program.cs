@@ -80,7 +80,8 @@ namespace DbMetaTool
         /// </summary>
         public static void BuildDatabase(string databaseDirectory, string scriptsDirectory)
         {
-            var databaseFilePath = Path.Combine(databaseDirectory, "database.fdb");
+            var databaseFileName = Environment.GetEnvironmentVariable("DB_FILE_NAME") ?? "database.fdb";
+            var databaseFilePath = Path.Combine(databaseDirectory, databaseFileName);
             var connectionString = FirebirdBuilder.BuildConnectionString(databaseDirectory, databaseFilePath);
 
             FirebirdBuilder.CreateDatabase(connectionString, databaseDirectory, databaseFilePath);
@@ -99,14 +100,10 @@ namespace DbMetaTool
             using var connection = new FirebirdSql.Data.FirebirdClient.FbConnection(connectionString);
             connection.Open();
 
-            var domainsExported = FirebirdExporter.ExportDomains(connection, outputDirectory);
-            var tablesExported = FirebirdExporter.ExportTablesWithColumns(connection, outputDirectory);
-            var proceduresExported = FirebirdExporter.ExportProcedures(connection, outputDirectory);
-
-            Console.WriteLine($"Exported count:");
-            Console.WriteLine($"Domains: {domainsExported}");
-            Console.WriteLine($"Tables: {tablesExported}");
-            Console.WriteLine($"Procedures: {proceduresExported}");
+            FirebirdExporter.ExportDomains(connection, outputDirectory);
+            FirebirdExporter.ExportTablesWithColumns(connection, outputDirectory);
+            FirebirdExporter.ExportProcedures(connection, outputDirectory);
+            FirebirdExporter.Report();
         }
 
         /// <summary>
@@ -119,6 +116,8 @@ namespace DbMetaTool
 
             FirebirdUpdater.UpdateGroup(scriptsDirectory, connection, GroupName.Domain);
             FirebirdUpdater.UpdateGroup(scriptsDirectory, connection, GroupName.Table);
+            FirebirdUpdater.UpdateGroup(scriptsDirectory, connection, GroupName.Procedure);
+            FirebirdUpdater.Report();
         }
     }
 }

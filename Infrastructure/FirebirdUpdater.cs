@@ -11,13 +11,34 @@ public static class FirebirdUpdater
 
     public static void UpdateGroup(string scriptsDirectory, FbConnection connection, GroupName groupName)
     {
-        var domainsDir = Path.Combine(scriptsDirectory, groupName.Value);
-        var domainFiles = GetSqlFiles(domainsDir);
+        if (Failures.Count > 0) return;
+        var groupDirectory = Path.Combine(scriptsDirectory, groupName.Value);
+        var groupFiles = Helpers.GetSqlFiles(groupDirectory);
 
-        ExecuteGroup(groupName, domainFiles, connection);
+        ExecuteGroup(groupName, groupFiles, connection);
     }
 
-    static void ExecuteGroup(GroupName groupName, IReadOnlyList<string> files, FbConnection connection)
+    public static void Report()
+    {
+        Console.WriteLine();
+        Console.WriteLine("RAPORT UPDATE-DB");
+        Console.WriteLine($"Wykonane: {_executedCount}");
+        Console.WriteLine($"Pominięte: {_skippedCount}");
+        Console.WriteLine($"Błędy: {Failures.Count}");
+        if (Failures.Count <= 0) return;
+        Console.WriteLine();
+        Console.WriteLine("Szczegóły błędów:");
+        foreach (var failure in Failures)
+        {
+            Console.WriteLine($"Plik: {failure.File}");
+            Console.WriteLine($"Błąd: {failure.Error}");
+            Console.WriteLine();
+        }
+        
+        throw new Exception("Update-db przerwany: wystąpiły błędy w skryptach.");
+    }
+
+    private static void ExecuteGroup(GroupName groupName, IReadOnlyList<string> files, FbConnection connection)
     {
         Console.WriteLine($"Update: {groupName.Value} ({files.Count} plików)");
 
@@ -27,7 +48,7 @@ public static class FirebirdUpdater
 
             var sqlToRun = originalSql;
 
-            if (groupName == GroupName.Domain)
+            if (groupName.Value == GroupName.Domain.Value)
             {
                 var domainName = TryExtractObjectName(originalSql, "DOMAIN");
                 if (domainName != null)
@@ -44,7 +65,7 @@ public static class FirebirdUpdater
                     }
                 }
             }
-            else if (groupName == GroupName.Table)
+            else if (groupName.Value == GroupName.Table.Value)
             {
                 var tableNameFromHeader = TryExtractObjectName(originalSql, "TABLE");
 
@@ -95,6 +116,13 @@ public static class FirebirdUpdater
                     Failures.Add((filePath, alterResult.ErrorMessage ?? "Nieznany błąd"));
                 }
             }
+            else if (groupName.Value == GroupName.Procedure.Value)
+            {
+                sqlToRun = EnsureCreateOrAlterForProcedure(originalSql);
+
+                _ = ProcedureExists(connection, TryExtractObjectName(sqlToRun, "PROCEDURE") ?? string.Empty);
+            }
+
             var result = ExecuteSingleStatementInTransaction(connection, sqlToRun);
             if (result.Success)
             {
@@ -108,25 +136,7 @@ public static class FirebirdUpdater
         }
     }
 
-    static IReadOnlyList<string> GetSqlFiles(string directoryPath)
-    {
-        if (!Directory.Exists(directoryPath))
-            return Array.Empty<string>();
-
-        return Directory.GetFiles(directoryPath, "*.sql", SearchOption.TopDirectoryOnly)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
-
-    static string NormalizeSqlForAdo(string sqlText)
-    {
-        var trimmed = sqlText.Trim();
-        if (trimmed.EndsWith(';'))
-            trimmed = trimmed[..^1].TrimEnd();
-        return trimmed;
-    }
-
-    static string StripLeadingEmptyAndCommentLines(string sqlText)
+    private static string StripLeadingEmptyAndCommentLines(string sqlText)
     {
         var lines = sqlText.Replace("\r\n", "\n").Split('\n');
         var index = 0;
@@ -147,7 +157,7 @@ public static class FirebirdUpdater
         return string.Join("\n", lines.Skip(index));
     }
 
-    static string? TryExtractObjectName(string sqlText, string objectKind)
+    private static string? TryExtractObjectName(string sqlText, string objectKind)
     {
         var clean = StripLeadingEmptyAndCommentLines(sqlText);
 
@@ -175,7 +185,7 @@ public static class FirebirdUpdater
         return objectName;
     }
 
-    static bool DomainExists(FbConnection connection, string domainName)
+    private static bool DomainExists(FbConnection connection, string domainName)
     {
         const string sql = @"SELECT 1 FROM RDB$FIELDS f WHERE TRIM(f.RDB$FIELD_NAME) = @name ROWS 1";
         using var cmd = new FbCommand(sql, connection);
@@ -183,7 +193,7 @@ public static class FirebirdUpdater
         return cmd.ExecuteScalar() != null;
     }
 
-    static bool TableExists(FbConnection connection, string tableName)
+    private static bool TableExists(FbConnection connection, string tableName)
     {
         const string sql = @"SELECT 1 FROM RDB$RELATIONS r WHERE TRIM(r.RDB$RELATION_NAME) = @name ROWS 1";
         using var cmd = new FbCommand(sql, connection);
@@ -191,11 +201,26 @@ public static class FirebirdUpdater
         return cmd.ExecuteScalar() != null;
     }
 
-    static (bool Success, string? ErrorMessage) ExecuteSingleStatementInTransaction(
+    private static bool ProcedureExists(FbConnection connection, string procedureName)
+    {
+        const string sql = @"SELECT 1 FROM RDB$PROCEDURES p WHERE TRIM(p.RDB$PROCEDURE_NAME) = @name ROWS 1";
+        using var cmd = new FbCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@name", procedureName);
+        return cmd.ExecuteScalar() != null;
+    }
+
+    private static string EnsureCreateOrAlterForProcedure(string sqlText)
+    {
+        var rgx = new System.Text.RegularExpressions.Regex(@"(?is)^\s*CREATE\s+PROCEDURE\b");
+        return rgx.Replace(sqlText, "CREATE OR ALTER PROCEDURE", 1
+        );
+    }
+
+    private static (bool Success, string? ErrorMessage) ExecuteSingleStatementInTransaction(
         FbConnection connection,
         string sqlText)
     {
-        var sqlToExecute = NormalizeSqlForAdo(sqlText);
+        var sqlToExecute = Helpers.NormalizeSqlForAdo(sqlText);
         if (string.IsNullOrWhiteSpace(sqlToExecute))
             return (true, null);
 
@@ -223,7 +248,7 @@ public static class FirebirdUpdater
         }
     }
 
-    static (bool Success, string? ErrorMessage) ExecuteStatementsInSingleTransaction(
+    private static (bool Success, string? ErrorMessage) ExecuteStatementsInSingleTransaction(
         FbConnection connection,
         IReadOnlyList<string> statements)
     {
@@ -232,7 +257,7 @@ public static class FirebirdUpdater
         {
             foreach (var statement in statements)
             {
-                var sql = NormalizeSqlForAdo(statement);
+                var sql = Helpers.NormalizeSqlForAdo(statement);
                 if (string.IsNullOrWhiteSpace(sql))
                     continue;
 
@@ -257,8 +282,7 @@ public static class FirebirdUpdater
         }
     }
 
-    static (string TableToken, string TableName, List<(string ColumnToken, string ColumnName, string DefinitionSql)> Columns)
-                ParseCreateTableColumns(string sqlText)
+    private static (string TableToken, string TableName, List<(string ColumnToken, string ColumnName, string DefinitionSql)> Columns) ParseCreateTableColumns(string sqlText)
     {
         var clean = StripLeadingEmptyAndCommentLines(sqlText);
 
@@ -267,14 +291,14 @@ public static class FirebirdUpdater
             @"(?is)^\s*CREATE\s+TABLE\s+(""[^""]+""|\w+)"
         );
         if (!match.Success)
-            throw new InvalidOperationException("Nie umiem znaleźć nagłówka CREATE TABLE w pliku.");
+            throw new InvalidOperationException("Nie udało się znaleźć nagłówka CREATE TABLE w pliku.");
 
         var tableToken = match.Groups[1].Value.Trim();
         var tableName = NormalizeIdentifierForComparison(tableToken);
 
         var startIndex = clean.IndexOf('(', match.Index + match.Length);
         if (startIndex < 0)
-            throw new InvalidOperationException("Nie umiem znaleźć '(' listy kolumn w CREATE TABLE.");
+            throw new InvalidOperationException("Nie udało się znaleźć '(' listy kolumn w CREATE TABLE.");
 
         var items = new List<string>();
         var current = new System.Text.StringBuilder();
@@ -374,7 +398,7 @@ public static class FirebirdUpdater
         return (tableToken, tableName, columns);
     }
 
-    static string NormalizeIdentifierForComparison(string identifierToken)
+    private static string NormalizeIdentifierForComparison(string identifierToken)
     {
         identifierToken = identifierToken.Trim();
         if (!identifierToken.StartsWith("\"", StringComparison.Ordinal) ||
@@ -384,7 +408,7 @@ public static class FirebirdUpdater
 
     }
 
-    static HashSet<string> ReadExistingColumnNames(
+    private static HashSet<string> ReadExistingColumnNames(
         FbConnection connection,
         string tableName)
     {

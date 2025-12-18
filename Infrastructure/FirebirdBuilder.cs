@@ -40,9 +40,9 @@ public static class FirebirdBuilder
         var tablesDir = Path.Combine(scriptsDirectory, "tables");
         var proceduresDir = Path.Combine(scriptsDirectory, "procedures");
 
-        var domainFiles = GetSqlFiles(domainsDir);
-        var tableFiles = GetSqlFiles(tablesDir);
-        var procedureFiles = GetSqlFiles(proceduresDir);
+        var domainFiles = Helpers.GetSqlFiles(domainsDir);
+        var tableFiles = Helpers.GetSqlFiles(tablesDir);
+        var procedureFiles = Helpers.GetSqlFiles(proceduresDir);
 
         var failures = new List<(string File, string Error)>();
         var executedOk = 0;
@@ -97,25 +97,6 @@ public static class FirebirdBuilder
         throw new Exception("Build-db przerwany: wystąpiły błędy w skryptach.");
     }
 
-    private static string NormalizeSqlForAdo(string sqlText)
-    {
-        var trimmed = sqlText.Trim();
-
-        if (trimmed.EndsWith(';'))
-            trimmed = trimmed[..^1].TrimEnd();
-
-        return trimmed;
-    }
-
-    private static List<string> GetSqlFiles(string directoryPath)
-    {
-        if (!Directory.Exists(directoryPath))
-            return [];
-
-        return Directory.GetFiles(directoryPath, "*.sql", SearchOption.TopDirectoryOnly)
-            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
 
     private static void InvokeFbCreateDatabase(string connectionString, bool overwrite)
     {
@@ -188,7 +169,7 @@ public static class FirebirdBuilder
         string filePath)
     {
         var sql = File.ReadAllText(filePath);
-        sql = NormalizeSqlForAdo(sql);
+        sql = Helpers.NormalizeSqlForAdo(sql);
 
         if (string.IsNullOrWhiteSpace(sql))
             return (true, null);
