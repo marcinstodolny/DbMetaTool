@@ -2,15 +2,15 @@
 
 namespace DbMetaTool.Infrastructure;
 
-public static class FirebirdExporter
+public class FirebirdExporter
 {
-    private static int _domainsExported; 
-    private static int _tablesExported;
-    private static int _proceduresExported;
-    public static void ExportDomains(FbConnection connection, string outputDirectory)
+    private int _domainsExported; 
+    private int _tablesExported;
+    private int _proceduresExported;
+    public void ExportDomains(FbConnection connection, string outputDirectory)
     {
-        EnsureOpen(connection);
-        var domainsDirectory = Path.Combine(outputDirectory, GroupName.Domain.Value);
+        Helpers.EnsureOpen(connection);
+        var domainsDirectory = Path.Combine(outputDirectory, ScriptGroup.Domain.GetFolderName());
         Directory.CreateDirectory(domainsDirectory);
         
         const string domainQuery = @"
@@ -59,10 +59,10 @@ public static class FirebirdExporter
         }
     }
 
-    public static void ExportTablesWithColumns(FbConnection connection, string outputDirectory)
+    public void ExportTablesWithColumns(FbConnection connection, string outputDirectory)
     {
-        EnsureOpen(connection);
-        var tablesDirectory = Path.Combine(outputDirectory, GroupName.Table.Value);
+        Helpers.EnsureOpen(connection);
+        var tablesDirectory = Path.Combine(outputDirectory, ScriptGroup.Table.GetFolderName());
         Directory.CreateDirectory(tablesDirectory);
         const string tablesQuery = @"
             SELECT TRIM(r.RDB$RELATION_NAME) AS TABLE_NAME
@@ -94,7 +94,7 @@ public static class FirebirdExporter
                 f.RDB$CHARACTER_LENGTH      AS CHAR_LEN
             FROM RDB$RELATION_FIELDS rf
             JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE
-            WHERE rf.RDB$RELATION_NAME = @tableName
+            WHERE TRIM(rf.RDB$RELATION_NAME) = @tableName
             ORDER BY rf.RDB$FIELD_POSITION";
 
         foreach (var tableName in tableNames)
@@ -149,10 +149,10 @@ public static class FirebirdExporter
         }
     }
 
-    public static void ExportProcedures(FbConnection connection, string outputDirectory)
+    public void ExportProcedures(FbConnection connection, string outputDirectory)
     {
-        EnsureOpen(connection);
-        var proceduresDirectory = Path.Combine(outputDirectory, GroupName.Procedure.Value);
+        Helpers.EnsureOpen(connection);
+        var proceduresDirectory = Path.Combine(outputDirectory, ScriptGroup.Procedure.GetFolderName());
         Directory.CreateDirectory(proceduresDirectory);
 
         const string proceduresQuery = @"
@@ -177,7 +177,7 @@ public static class FirebirdExporter
             f.RDB$CHARACTER_LENGTH      AS CHAR_LEN
         FROM RDB$PROCEDURE_PARAMETERS pp
         JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = pp.RDB$FIELD_SOURCE
-        WHERE pp.RDB$PROCEDURE_NAME = @procName
+        WHERE TRIM(pp.RDB$PROCEDURE_NAME) = @procName
         ORDER BY pp.RDB$PARAMETER_TYPE, pp.RDB$PARAMETER_NUMBER";
 
         using var proceduresCommand = new FbCommand(proceduresQuery, connection);
@@ -253,7 +253,7 @@ public static class FirebirdExporter
         }
     }
 
-    public static void Report()
+    public void Report()
     {
         Console.WriteLine($"Exported count:");
         Console.WriteLine($"Domains: {_domainsExported}");
@@ -261,32 +261,22 @@ public static class FirebirdExporter
         Console.WriteLine($"Procedures: {_proceduresExported}");
     }
 
-    private static void EnsureOpen(FbConnection connection)
-    {
-        ArgumentNullException.ThrowIfNull(connection);
-
-        if (connection.State != System.Data.ConnectionState.Open)
-        {
-            connection.Open();
-        }
-    }
-
-    private static string TrimFbString(object value)
+    private string TrimFbString(object value)
         => value == DBNull.Value ? string.Empty : Convert.ToString(value)!.Trim();
 
-    private static int? ReadNullableInt(object value)
+    private int? ReadNullableInt(object value)
         => value == DBNull.Value ? null : Convert.ToInt32(value);
 
-    private static short? ReadNullableInt16(object value)
+    private short? ReadNullableInt16(object value)
         => value == DBNull.Value ? null : Convert.ToInt16(value);
 
-    private static bool StartsWithRdb(string identifier)
+    private bool StartsWithRdb(string identifier)
         => identifier.StartsWith("RDB$", StringComparison.OrdinalIgnoreCase);
 
-    private static string QuoteIdentifier(string identifier)
+    private string QuoteIdentifier(string identifier)
         => "\"" + identifier.Replace("\"", "\"\"") + "\"";
 
-    private static string SanitizeFileName(string name)
+    private string SanitizeFileName(string name)
     {
         var invalidChars = Path.GetInvalidFileNameChars();
         var result = name;
@@ -295,7 +285,7 @@ public static class FirebirdExporter
         return result;
     }
 
-    private static string BuildTypeSql(
+    private string BuildTypeSql(
         short fieldType,
         short? fieldSubType,
         int? fieldLength,

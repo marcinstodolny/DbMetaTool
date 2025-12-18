@@ -2,23 +2,24 @@
 
 namespace DbMetaTool.Infrastructure;
 
-public static class FirebirdUpdater
+public class FirebirdUpdater
 {
-    private static int _executedCount;
-    private static int _skippedCount;
-    private static readonly List<(string File, string Error)> Failures = new();
+    private int _executedCount;
+    private int _skippedCount;
+    private readonly List<(string File, string Error)> Failures = new();
 
 
-    public static void UpdateGroup(string scriptsDirectory, FbConnection connection, GroupName groupName)
+    public  void UpdateGroup(string scriptsDirectory, FbConnection connection, ScriptGroup scriptGroup)
     {
+        Helpers.EnsureOpen(connection);
         if (Failures.Count > 0) return;
-        var groupDirectory = Path.Combine(scriptsDirectory, groupName.Value);
+        var groupDirectory = Path.Combine(scriptsDirectory, scriptGroup.GetFolderName());
         var groupFiles = Helpers.GetSqlFiles(groupDirectory);
 
-        ExecuteGroup(groupName, groupFiles, connection);
+        ExecuteGroup(scriptGroup, groupFiles, connection);
     }
 
-    public static void Report()
+    public void Report()
     {
         Console.WriteLine();
         Console.WriteLine("RAPORT UPDATE-DB");
@@ -34,13 +35,12 @@ public static class FirebirdUpdater
             Console.WriteLine($"Błąd: {failure.Error}");
             Console.WriteLine();
         }
-        
+
         throw new Exception("Update-db przerwany: wystąpiły błędy w skryptach.");
     }
-
-    private static void ExecuteGroup(GroupName groupName, IReadOnlyList<string> files, FbConnection connection)
+    private void ExecuteGroup(ScriptGroup scriptGroup, IReadOnlyList<string> files, FbConnection connection)
     {
-        Console.WriteLine($"Update: {groupName.Value} ({files.Count} plików)");
+        Console.WriteLine($"Update: {scriptGroup.GetFolderName()} ({files.Count} plików)");
 
         foreach (var filePath in files)
         {
@@ -48,7 +48,7 @@ public static class FirebirdUpdater
 
             var sqlToRun = originalSql;
 
-            if (groupName.Value == GroupName.Domain.Value)
+            if (scriptGroup == ScriptGroup.Domain)
             {
                 var domainName = TryExtractObjectName(originalSql, "DOMAIN");
                 if (domainName != null)
@@ -65,7 +65,7 @@ public static class FirebirdUpdater
                     }
                 }
             }
-            else if (groupName.Value == GroupName.Table.Value)
+            else if (scriptGroup == ScriptGroup.Table)
             {
                 var tableNameFromHeader = TryExtractObjectName(originalSql, "TABLE");
 
@@ -76,9 +76,10 @@ public static class FirebirdUpdater
                         var parsed = ParseCreateTableColumns(originalSql);
                         tableNameFromHeader = parsed.TableName;
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // TODO
+                        Failures.Add((filePath, ex.Message));
+                        break;
                     }
                 }
 
@@ -114,13 +115,17 @@ public static class FirebirdUpdater
                     }
 
                     Failures.Add((filePath, alterResult.ErrorMessage ?? "Nieznany błąd"));
+                    break;
                 }
             }
-            else if (groupName.Value == GroupName.Procedure.Value)
+            else if (scriptGroup == ScriptGroup.Procedure)
             {
                 sqlToRun = EnsureCreateOrAlterForProcedure(originalSql);
-
-                _ = ProcedureExists(connection, TryExtractObjectName(sqlToRun, "PROCEDURE") ?? string.Empty);
+            }
+            else
+            {
+                Failures.Add((filePath, $"Nieobsługiwany typ skryptu: {scriptGroup}"));
+                break;
             }
 
             var result = ExecuteSingleStatementInTransaction(connection, sqlToRun);
@@ -136,7 +141,7 @@ public static class FirebirdUpdater
         }
     }
 
-    private static string StripLeadingEmptyAndCommentLines(string sqlText)
+    private string StripLeadingEmptyAndCommentLines(string sqlText)
     {
         var lines = sqlText.Replace("\r\n", "\n").Split('\n');
         var index = 0;
@@ -157,7 +162,7 @@ public static class FirebirdUpdater
         return string.Join("\n", lines.Skip(index));
     }
 
-    private static string? TryExtractObjectName(string sqlText, string objectKind)
+    private string? TryExtractObjectName(string sqlText, string objectKind)
     {
         var clean = StripLeadingEmptyAndCommentLines(sqlText);
 
@@ -179,13 +184,16 @@ public static class FirebirdUpdater
             return null;
 
         var objectName = nameGroup.Trim();
-        if (objectName.StartsWith("\"") && objectName.EndsWith("\"") && objectName.Length >= 2)
+        if (objectName.StartsWith('\"') && objectName.EndsWith('\"') && objectName.Length >= 2)
             objectName = objectName.Substring(1, objectName.Length - 2).Replace("\"\"", "\"");
 
-        return objectName;
+        if (nameGroup.StartsWith('\"') && nameGroup.EndsWith('\"'))
+            return objectName;
+
+        return objectName.ToUpperInvariant(); 
     }
 
-    private static bool DomainExists(FbConnection connection, string domainName)
+    private bool DomainExists(FbConnection connection, string domainName)
     {
         const string sql = @"SELECT 1 FROM RDB$FIELDS f WHERE TRIM(f.RDB$FIELD_NAME) = @name ROWS 1";
         using var cmd = new FbCommand(sql, connection);
@@ -193,7 +201,7 @@ public static class FirebirdUpdater
         return cmd.ExecuteScalar() != null;
     }
 
-    private static bool TableExists(FbConnection connection, string tableName)
+    private bool TableExists(FbConnection connection, string tableName)
     {
         const string sql = @"SELECT 1 FROM RDB$RELATIONS r WHERE TRIM(r.RDB$RELATION_NAME) = @name ROWS 1";
         using var cmd = new FbCommand(sql, connection);
@@ -201,7 +209,7 @@ public static class FirebirdUpdater
         return cmd.ExecuteScalar() != null;
     }
 
-    private static bool ProcedureExists(FbConnection connection, string procedureName)
+    private bool ProcedureExists(FbConnection connection, string procedureName)
     {
         const string sql = @"SELECT 1 FROM RDB$PROCEDURES p WHERE TRIM(p.RDB$PROCEDURE_NAME) = @name ROWS 1";
         using var cmd = new FbCommand(sql, connection);
@@ -209,14 +217,14 @@ public static class FirebirdUpdater
         return cmd.ExecuteScalar() != null;
     }
 
-    private static string EnsureCreateOrAlterForProcedure(string sqlText)
+    private string EnsureCreateOrAlterForProcedure(string sqlText)
     {
         var rgx = new System.Text.RegularExpressions.Regex(@"(?is)^\s*CREATE\s+PROCEDURE\b");
         return rgx.Replace(sqlText, "CREATE OR ALTER PROCEDURE", 1
         );
     }
 
-    private static (bool Success, string? ErrorMessage) ExecuteSingleStatementInTransaction(
+    private (bool Success, string? ErrorMessage) ExecuteSingleStatementInTransaction(
         FbConnection connection,
         string sqlText)
     {
@@ -248,7 +256,7 @@ public static class FirebirdUpdater
         }
     }
 
-    private static (bool Success, string? ErrorMessage) ExecuteStatementsInSingleTransaction(
+    private (bool Success, string? ErrorMessage) ExecuteStatementsInSingleTransaction(
         FbConnection connection,
         IReadOnlyList<string> statements)
     {
@@ -282,7 +290,7 @@ public static class FirebirdUpdater
         }
     }
 
-    private static (string TableToken, string TableName, List<(string ColumnToken, string ColumnName, string DefinitionSql)> Columns) ParseCreateTableColumns(string sqlText)
+    private (string TableToken, string TableName, List<(string ColumnToken, string ColumnName, string DefinitionSql)> Columns) ParseCreateTableColumns(string sqlText)
     {
         var clean = StripLeadingEmptyAndCommentLines(sqlText);
 
@@ -398,17 +406,17 @@ public static class FirebirdUpdater
         return (tableToken, tableName, columns);
     }
 
-    private static string NormalizeIdentifierForComparison(string identifierToken)
+    private string NormalizeIdentifierForComparison(string identifierToken)
     {
         identifierToken = identifierToken.Trim();
-        if (!identifierToken.StartsWith("\"", StringComparison.Ordinal) ||
-            !identifierToken.EndsWith("\"", StringComparison.Ordinal)) return identifierToken.ToUpperInvariant();
+        if (!identifierToken.StartsWith('\"') ||
+            !identifierToken.EndsWith('\"')) return identifierToken.ToUpperInvariant();
         var unquoted = identifierToken.Substring(1, identifierToken.Length - 2).Replace("\"\"", "\"");
         return unquoted;
 
     }
 
-    private static HashSet<string> ReadExistingColumnNames(
+    private HashSet<string> ReadExistingColumnNames(
         FbConnection connection,
         string tableName)
     {
