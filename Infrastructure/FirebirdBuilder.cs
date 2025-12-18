@@ -1,17 +1,9 @@
-﻿namespace DbMetaTool.Infrastructure;
+﻿using FirebirdSql.Data.FirebirdClient;
+
+namespace DbMetaTool.Infrastructure;
 
 public static class FirebirdBuilder
 {
-    public static string BuildConnectionString(string databaseDirectory, string databaseFilePath)
-    {
-
-        var user = Environment.GetEnvironmentVariable("FB_USER") ?? "SYSDBA";
-        var password = Environment.GetEnvironmentVariable("FB_PASSWORD") ?? "masterkey";
-        var host = Environment.GetEnvironmentVariable("FB_HOST") ?? "localhost";
-
-        return $"User={user};Password={password};Database={databaseFilePath};DataSource={host};Dialect=3;Charset=UTF8;";
-    }
-
     public static void CreateDatabase(string connectionString, string databaseDirectory, string databaseFilePath)
     {
         Directory.CreateDirectory(databaseDirectory);
@@ -36,43 +28,37 @@ public static class FirebirdBuilder
 
     public static (int executedOk, List<(string File, string Error)> failures) ApplyScripts(string connectionString, string scriptsDirectory)
     {
-        var domainsDir = Path.Combine(scriptsDirectory, "domains");
-        var tablesDir = Path.Combine(scriptsDirectory, "tables");
-        var proceduresDir = Path.Combine(scriptsDirectory, "procedures");
-
-        var domainFiles = Helpers.GetSqlFiles(domainsDir);
-        var tableFiles = Helpers.GetSqlFiles(tablesDir);
-        var procedureFiles = Helpers.GetSqlFiles(proceduresDir);
-
         var failures = new List<(string File, string Error)>();
         var executedOk = 0;
 
-        using (var connection = new FirebirdSql.Data.FirebirdClient.FbConnection(connectionString))
+        using var connection = Helpers.CreateAndOpenConnection(connectionString);
+
+        using var transaction = connection.BeginTransaction();
+
+        foreach (var scriptGroup in ScriptGroupInfo.ExecutionOrder)
         {
-            connection.Open();
+            var groupDirectory = Path.Combine(scriptsDirectory, scriptGroup.GetFolderName());
+            var groupFiles = Helpers.GetSqlFiles(groupDirectory);
 
-            void ExecuteGroup(string groupName, IReadOnlyList<string> files)
+            foreach (var filePath in groupFiles)
             {
-                Console.WriteLine($"Wykonywanie: {groupName} ({files.Count} plików)");
-
-                foreach (var filePath in files)
+                var result = ExecuteSingleStatement(connection, transaction, filePath);
+                if (result.Success)
                 {
-                    var result = ExecuteSingleStatement(connection, filePath);
-                    if (result.Success)
-                    {
-                        executedOk++;
-                        continue;
-                    }
-
-                    failures.Add((filePath, result.ErrorMessage ?? "Nieznany błąd"));
-                    break;
+                    executedOk++;
+                    continue;
                 }
+
+                failures.Add((filePath, result.ErrorMessage ?? "Nieznany błąd"));
+                break;
             }
 
-            ExecuteGroup("domains", domainFiles);
-            if (failures.Count == 0) ExecuteGroup("tables", tableFiles);
-            if (failures.Count == 0) ExecuteGroup("procedures", procedureFiles);
+            if (failures.Count > 0)
+                break;
         }
+
+        if (failures.Count == 0) transaction.Commit();
+        else transaction.Rollback();
 
         return (executedOk, failures);
     }
@@ -82,7 +68,7 @@ public static class FirebirdBuilder
         Console.WriteLine();
         Console.WriteLine("RAPORT BUILD-DB");
         Console.WriteLine($"DB: {databaseFilePath}");
-        Console.WriteLine($"OK: {executedOk}");
+        Console.WriteLine($"Wykonane: {executedOk}");
         Console.WriteLine($"Błędy: {failures.Count}");
 
         if (failures.Count <= 0) return;
@@ -100,7 +86,7 @@ public static class FirebirdBuilder
 
     private static void InvokeFbCreateDatabase(string connectionString, bool overwrite)
     {
-        var fbConnectionType = typeof(FirebirdSql.Data.FirebirdClient.FbConnection);
+        var fbConnectionType = typeof(FbConnection);
 
         var createDatabaseMethods = fbConnectionType
             .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
@@ -122,7 +108,7 @@ public static class FirebirdBuilder
             const int pageSize = 8192;
             const bool forcedWrites = true;
 
-            fourParametersMethodInfo.Invoke(null, [connectionString, pageSize, forcedWrites, overwrite]);
+            fourParametersMethodInfo.Invoke(null, new Object[] { connectionString, pageSize, forcedWrites, overwrite});
             return;
         }
 
@@ -136,7 +122,7 @@ public static class FirebirdBuilder
 
         if (twoParametersMethodInfo != null)
         {
-            twoParametersMethodInfo.Invoke(null, [connectionString, overwrite]);
+            twoParametersMethodInfo.Invoke(null, new Object[] { connectionString, overwrite});
             return;
         }
 
@@ -148,7 +134,7 @@ public static class FirebirdBuilder
 
         if (oneParameterMethodInfo != null)
         {
-            oneParameterMethodInfo.Invoke(null, [connectionString]);
+            oneParameterMethodInfo.Invoke(null, new Object[] {connectionString});
             return;
         }
 
@@ -165,7 +151,8 @@ public static class FirebirdBuilder
     }
 
     private static (bool Success, string? ErrorMessage) ExecuteSingleStatement(
-        FirebirdSql.Data.FirebirdClient.FbConnection connection,
+        FbConnection connection,
+        FbTransaction transaction,
         string filePath)
     {
         var sql = File.ReadAllText(filePath);
@@ -177,18 +164,12 @@ public static class FirebirdBuilder
         try
         {
             using var command = connection.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = sql;
-            command.CommandType = System.Data.CommandType.Text;
             command.ExecuteNonQuery();
             return (true, null);
         }
-        catch (FirebirdSql.Data.FirebirdClient.FbException fbEx)
-        {
-            return (false, fbEx.Message);
-        }
-        catch (Exception ex)
-        {
-            return (false, ex.Message);
-        }
+        catch (FbException fbEx) { return (false, fbEx.Message); }
+        catch (Exception ex) { return (false, ex.Message); }
     }
 }

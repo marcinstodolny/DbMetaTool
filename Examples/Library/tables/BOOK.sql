@@ -1,0 +1,5 @@
+CREATE TABLE "BOOK"
+(
+  "ID" "D_ID",
+  "TITLE" "D_TITLE"
+)

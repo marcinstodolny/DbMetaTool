@@ -1,0 +1,5 @@
+CREATE TABLE "MEMBER"
+(
+  "ID" "D_ID",
+  "NAME" VARCHAR(200)
+)

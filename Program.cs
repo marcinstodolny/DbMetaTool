@@ -82,7 +82,7 @@ namespace DbMetaTool
         {
             var databaseFileName = Environment.GetEnvironmentVariable("DB_FILE_NAME") ?? "database.fdb";
             var databaseFilePath = Path.Combine(databaseDirectory, databaseFileName);
-            var connectionString = FirebirdBuilder.BuildConnectionString(databaseDirectory, databaseFilePath);
+            var connectionString = Helpers.BuildConnectionString(databaseFilePath);
 
             FirebirdBuilder.CreateDatabase(connectionString, databaseDirectory, databaseFilePath);
             var applyResult = FirebirdBuilder.ApplyScripts(connectionString, scriptsDirectory);
@@ -97,13 +97,14 @@ namespace DbMetaTool
         {
             Directory.CreateDirectory(outputDirectory);
 
-            using var connection = new FirebirdSql.Data.FirebirdClient.FbConnection(connectionString);
-            connection.Open();
+            using var connection = Helpers.CreateAndOpenConnection(connectionString);
 
-            FirebirdExporter.ExportDomains(connection, outputDirectory);
-            FirebirdExporter.ExportTablesWithColumns(connection, outputDirectory);
-            FirebirdExporter.ExportProcedures(connection, outputDirectory);
-            FirebirdExporter.Report();
+            var firebirdExporter = new FirebirdExporter();
+
+            firebirdExporter.ExportDomains(connection, outputDirectory);
+            firebirdExporter.ExportTablesWithColumns(connection, outputDirectory);
+            firebirdExporter.ExportProcedures(connection, outputDirectory);
+            firebirdExporter.Report();
         }
 
         /// <summary>
@@ -111,13 +112,16 @@ namespace DbMetaTool
         /// </summary>
         public static void UpdateDatabase(string connectionString, string scriptsDirectory)
         {
-            using var connection = new FirebirdSql.Data.FirebirdClient.FbConnection(connectionString);
-            connection.Open();
+            using var connection = Helpers.CreateAndOpenConnection(connectionString);
 
-            FirebirdUpdater.UpdateGroup(scriptsDirectory, connection, GroupName.Domain);
-            FirebirdUpdater.UpdateGroup(scriptsDirectory, connection, GroupName.Table);
-            FirebirdUpdater.UpdateGroup(scriptsDirectory, connection, GroupName.Procedure);
-            FirebirdUpdater.Report();
+            var firebirdUpdater = new FirebirdUpdater();
+
+            foreach (var group in ScriptGroupInfo.ExecutionOrder)
+            {
+                firebirdUpdater.UpdateGroup(scriptsDirectory, connection, group);
+            }
+
+            firebirdUpdater.Report();
         }
     }
 }
