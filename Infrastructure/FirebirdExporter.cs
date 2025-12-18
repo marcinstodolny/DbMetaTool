@@ -150,6 +150,113 @@ public static class FirebirdExporter
         return tablesExported;
     }
 
+    public static int ExportProcedures(FbConnection connection, string outputDirectory)
+    {
+        EnsureOpen(connection);
+        var proceduresDirectory = Path.Combine(outputDirectory, "procedures");
+        Directory.CreateDirectory(proceduresDirectory);
+
+        var proceduresExported = 0;
+        const string proceduresQuery = @"
+        SELECT
+            TRIM(p.RDB$PROCEDURE_NAME)  AS PROC_NAME,
+            p.RDB$PROCEDURE_SOURCE      AS PROC_SOURCE
+        FROM RDB$PROCEDURES p
+        WHERE COALESCE(p.RDB$SYSTEM_FLAG, 0) = 0
+        ORDER BY p.RDB$PROCEDURE_NAME";
+
+        const string procedureParamsQuery = @"
+        SELECT
+            pp.RDB$PARAMETER_TYPE       AS PARAMETER_TYPE,
+            pp.RDB$PARAMETER_NUMBER     AS PARAMETER_NUMBER,
+            pp.RDB$PARAMETER_NAME       AS PARAMETER_NAME,
+            pp.RDB$FIELD_SOURCE         AS FIELD_SOURCE,
+            f.RDB$FIELD_TYPE            AS FIELD_TYPE,
+            f.RDB$FIELD_SUB_TYPE        AS FIELD_SUB_TYPE,
+            f.RDB$FIELD_LENGTH          AS FIELD_LENGTH,
+            f.RDB$FIELD_PRECISION       AS FIELD_PRECISION,
+            f.RDB$FIELD_SCALE           AS FIELD_SCALE,
+            f.RDB$CHARACTER_LENGTH      AS CHAR_LEN
+        FROM RDB$PROCEDURE_PARAMETERS pp
+        JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = pp.RDB$FIELD_SOURCE
+        WHERE pp.RDB$PROCEDURE_NAME = @procName
+        ORDER BY pp.RDB$PARAMETER_TYPE, pp.RDB$PARAMETER_NUMBER";
+
+        using var proceduresCommand = new FbCommand(proceduresQuery, connection);
+        using var reader = proceduresCommand.ExecuteReader();
+        while (reader.Read())
+        {
+            var procedureName = TrimFbString(reader["PROC_NAME"]);
+            var procedureSource = reader["PROC_SOURCE"] == DBNull.Value ? string.Empty : Convert.ToString(reader["PROC_SOURCE"])!.TrimEnd();
+
+            var inputParams = new List<string>();
+            var outputParams = new List<string>();
+
+            using (var paramsCommand = new FbCommand(procedureParamsQuery, connection))
+            {
+                paramsCommand.Parameters.AddWithValue("@procName", procedureName);
+
+                using var paramsReader = paramsCommand.ExecuteReader();
+                while (paramsReader.Read())
+                {
+                    var parameterType = Convert.ToInt16(paramsReader["PARAMETER_TYPE"]);
+                    var parameterName = TrimFbString(paramsReader["PARAMETER_NAME"]);
+                    var fieldSource = TrimFbString(paramsReader["FIELD_SOURCE"]);
+
+                    string typeSql;
+                    if (!StartsWithRdb(fieldSource))
+                    {
+                        typeSql = QuoteIdentifier(fieldSource);
+                    }
+                    else
+                    {
+                        var fieldType = Convert.ToInt16(paramsReader["FIELD_TYPE"]);
+                        var fieldSubType = ReadNullableInt16(paramsReader["FIELD_SUB_TYPE"]);
+                        var fieldLength = ReadNullableInt(paramsReader["FIELD_LENGTH"]);
+                        var fieldPrecision = ReadNullableInt16(paramsReader["FIELD_PRECISION"]);
+                        var fieldScale = ReadNullableInt16(paramsReader["FIELD_SCALE"]);
+                        var characterLength = ReadNullableInt16(paramsReader["CHAR_LEN"]);
+
+                        typeSql = BuildTypeSql(fieldType, fieldSubType, fieldLength, fieldPrecision, fieldScale, characterLength);
+                    }
+
+                    var paramSql = $"{QuoteIdentifier(parameterName)} {typeSql}";
+
+                    if (parameterType == 0) inputParams.Add("  " + paramSql);
+                    else outputParams.Add("  " + paramSql);
+                }
+            }
+
+            var header = $"CREATE OR ALTER PROCEDURE {QuoteIdentifier(procedureName)}";
+            if (inputParams.Count > 0)
+                header += "\n(\n" + string.Join(",\n", inputParams) + "\n)";
+
+            if (outputParams.Count > 0)
+                header += "\nRETURNS\n(\n" + string.Join(",\n", outputParams) + "\n)";
+
+            var body = procedureSource;
+            if (string.IsNullOrWhiteSpace(body))
+            {
+                body = "AS\nBEGIN\nEND";
+            }
+            else
+            {
+                var trimmed = body.TrimStart();
+                if (!trimmed.StartsWith("AS", StringComparison.OrdinalIgnoreCase))
+                    body = "AS\n" + body;
+            }
+
+            var finalSql = header + "\n" + body;
+
+            var filePath = Path.Combine(proceduresDirectory, SanitizeFileName(procedureName) + ".sql");
+            File.WriteAllText(filePath, finalSql.Trim() + Environment.NewLine);
+
+            proceduresExported++;
+        }
+
+        return proceduresExported;
+    }
+
     private static void EnsureOpen(FbConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);

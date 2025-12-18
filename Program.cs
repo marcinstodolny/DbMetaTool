@@ -100,10 +100,12 @@ namespace DbMetaTool
 
             var domainsExported = FirebirdExporter.ExportDomains(connection, outputDirectory);
             var tablesExported = FirebirdExporter.ExportTablesWithColumns(connection, outputDirectory);
+            var proceduresExported = FirebirdExporter.ExportProcedures(connection, outputDirectory);
 
             Console.WriteLine($"Exported count:");
             Console.WriteLine($"Domains: {domainsExported}");
             Console.WriteLine($"Tables: {tablesExported}");
+            Console.WriteLine($"Procedures: {proceduresExported}");
         }
 
         /// <summary>
