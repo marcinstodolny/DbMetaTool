@@ -58,6 +58,98 @@ public static class FirebirdExporter
         return domainExported;
     }
 
+    public static int ExportTablesWithColumns(FbConnection connection, string outputDirectory)
+    {
+        EnsureOpen(connection);
+        var tablesDirectory = Path.Combine(outputDirectory, "tables");
+        Directory.CreateDirectory(tablesDirectory);
+        var tablesExported = 0;
+        const string tablesQuery = @"
+            SELECT TRIM(r.RDB$RELATION_NAME) AS TABLE_NAME
+            FROM RDB$RELATIONS r
+            WHERE COALESCE(r.RDB$SYSTEM_FLAG, 0) = 0
+              AND r.RDB$RELATION_TYPE = 0
+            ORDER BY r.RDB$RELATION_NAME";
+
+        var tableNames = new List<string>();
+        using (var tablesCommand = new FbCommand(tablesQuery, connection))
+        using (var reader = tablesCommand.ExecuteReader())
+        {
+            while (reader.Read())
+                tableNames.Add(TrimFbString(reader["TABLE_NAME"]));
+        }
+
+        const string columnsQuery = @"
+            SELECT
+                rf.RDB$FIELD_POSITION       AS FIELD_POSITION,
+                rf.RDB$FIELD_NAME           AS COLUMN_NAME,
+                rf.RDB$NULL_FLAG            AS NULL_FLAG,
+                rf.RDB$DEFAULT_SOURCE       AS DEFAULT_SOURCE,
+                rf.RDB$FIELD_SOURCE         AS FIELD_SOURCE,
+                f.RDB$FIELD_TYPE            AS FIELD_TYPE,
+                f.RDB$FIELD_SUB_TYPE        AS FIELD_SUB_TYPE,
+                f.RDB$FIELD_LENGTH          AS FIELD_LENGTH,
+                f.RDB$FIELD_PRECISION       AS FIELD_PRECISION,
+                f.RDB$FIELD_SCALE           AS FIELD_SCALE,
+                f.RDB$CHARACTER_LENGTH      AS CHAR_LEN
+            FROM RDB$RELATION_FIELDS rf
+            JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE
+            WHERE rf.RDB$RELATION_NAME = @tableName
+            ORDER BY rf.RDB$FIELD_POSITION";
+
+        foreach (var tableName in tableNames)
+        {
+            var columnLines = new List<string>();
+
+            using var columnsCommand = new FbCommand(columnsQuery, connection);
+            columnsCommand.Parameters.AddWithValue("@tableName", tableName);
+
+            using var reader = columnsCommand.ExecuteReader();
+            while (reader.Read())
+            {
+                var columnName = TrimFbString(reader["COLUMN_NAME"]);
+                var fieldSource = TrimFbString(reader["FIELD_SOURCE"]);
+
+                var isNotNull = reader["NULL_FLAG"] != DBNull.Value && Convert.ToInt16(reader["NULL_FLAG"]) == 1;
+                var defaultSource = reader["DEFAULT_SOURCE"] == DBNull.Value ? string.Empty : Convert.ToString(reader["DEFAULT_SOURCE"])!.Trim();
+
+                string typeSql;
+                if (!StartsWithRdb(fieldSource))
+                {
+                    typeSql = QuoteIdentifier(fieldSource);
+                }
+                else
+                {
+                    var fieldType = Convert.ToInt16(reader["FIELD_TYPE"]);
+                    var fieldSubType = ReadNullableInt16(reader["FIELD_SUB_TYPE"]);
+                    var fieldLength = ReadNullableInt(reader["FIELD_LENGTH"]);
+                    var fieldPrecision = ReadNullableInt16(reader["FIELD_PRECISION"]);
+                    var fieldScale = ReadNullableInt16(reader["FIELD_SCALE"]);
+                    var characterLength = ReadNullableInt16(reader["CHAR_LEN"]);
+
+                    typeSql = BuildTypeSql(fieldType, fieldSubType, fieldLength, fieldPrecision, fieldScale, characterLength);
+                }
+
+                var columnSql = $"{QuoteIdentifier(columnName)} {typeSql}";
+                if (!string.IsNullOrWhiteSpace(defaultSource)) columnSql += " " + defaultSource;
+                if (isNotNull) columnSql += " NOT NULL";
+
+                columnLines.Add("  " + columnSql);
+            }
+
+            var createTableSql =
+                $"CREATE TABLE {QuoteIdentifier(tableName)}\n(\n" +
+                string.Join(",\n", columnLines) +
+                "\n)";
+
+            var filePath = Path.Combine(tablesDirectory, SanitizeFileName(tableName) + ".sql");
+            File.WriteAllText(filePath, createTableSql.Trim() + Environment.NewLine);
+
+            tablesExported++;
+        }
+        return tablesExported;
+    }
+
     private static void EnsureOpen(FbConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -76,6 +168,9 @@ public static class FirebirdExporter
 
     static short? ReadNullableInt16(object value)
         => value == DBNull.Value ? null : Convert.ToInt16(value);
+
+    static bool StartsWithRdb(string identifier)
+        => identifier.StartsWith("RDB$", StringComparison.OrdinalIgnoreCase);
 
     static string QuoteIdentifier(string identifier)
         => "\"" + identifier.Replace("\"", "\"\"") + "\"";

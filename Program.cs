@@ -99,9 +99,11 @@ namespace DbMetaTool
             connection.Open();
 
             var domainsExported = FirebirdExporter.ExportDomains(connection, outputDirectory);
+            var tablesExported = FirebirdExporter.ExportTablesWithColumns(connection, outputDirectory);
 
             Console.WriteLine($"Exported count:");
             Console.WriteLine($"Domains: {domainsExported}");
+            Console.WriteLine($"Tables: {tablesExported}");
         }
 
         /// <summary>
