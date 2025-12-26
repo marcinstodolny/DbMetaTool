@@ -6,13 +6,13 @@ public class FirebirdUpdater
 {
     private int _executedCount;
     private int _skippedCount;
-    private readonly List<(string File, string Error)> Failures = new();
+    private readonly List<(string File, string Error)> _failures = new();
 
 
     public  void UpdateGroup(string scriptsDirectory, FbConnection connection, ScriptGroup scriptGroup)
     {
         Helpers.EnsureOpen(connection);
-        if (Failures.Count > 0) return;
+        if (_failures.Count > 0) return;
         var groupDirectory = Path.Combine(scriptsDirectory, scriptGroup.GetFolderName());
         var groupFiles = Helpers.GetSqlFiles(groupDirectory);
 
@@ -25,11 +25,11 @@ public class FirebirdUpdater
         Console.WriteLine("RAPORT UPDATE-DB");
         Console.WriteLine($"Wykonane: {_executedCount}");
         Console.WriteLine($"Pominięte: {_skippedCount}");
-        Console.WriteLine($"Błędy: {Failures.Count}");
-        if (Failures.Count <= 0) return;
+        Console.WriteLine($"Błędy: {_failures.Count}");
+        if (_failures.Count <= 0) return;
         Console.WriteLine();
         Console.WriteLine("Szczegóły błędów:");
-        foreach (var failure in Failures)
+        foreach (var failure in _failures)
         {
             Console.WriteLine($"Plik: {failure.File}");
             Console.WriteLine($"Błąd: {failure.Error}");
@@ -78,7 +78,7 @@ public class FirebirdUpdater
                     }
                     catch (Exception ex)
                     {
-                        Failures.Add((filePath, ex.Message));
+                        _failures.Add((filePath, ex.Message));
                         break;
                     }
                 }
@@ -114,7 +114,7 @@ public class FirebirdUpdater
                         continue;
                     }
 
-                    Failures.Add((filePath, alterResult.ErrorMessage ?? "Nieznany błąd"));
+                    _failures.Add((filePath, alterResult.ErrorMessage ?? "Nieznany błąd"));
                     break;
                 }
             }
@@ -124,7 +124,7 @@ public class FirebirdUpdater
             }
             else
             {
-                Failures.Add((filePath, $"Nieobsługiwany typ skryptu: {scriptGroup}"));
+                _failures.Add((filePath, $"Nieobsługiwany typ skryptu: {scriptGroup}"));
                 break;
             }
 
@@ -135,7 +135,7 @@ public class FirebirdUpdater
                 continue;
             }
 
-            Failures.Add((filePath, result.ErrorMessage ?? "Nieznany błąd"));
+            _failures.Add((filePath, result.ErrorMessage ?? "Nieznany błąd"));
 
             break;
         }
@@ -209,14 +209,6 @@ public class FirebirdUpdater
         return cmd.ExecuteScalar() != null;
     }
 
-    private bool ProcedureExists(FbConnection connection, string procedureName)
-    {
-        const string sql = @"SELECT 1 FROM RDB$PROCEDURES p WHERE TRIM(p.RDB$PROCEDURE_NAME) = @name ROWS 1";
-        using var cmd = new FbCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@name", procedureName);
-        return cmd.ExecuteScalar() != null;
-    }
-
     private string EnsureCreateOrAlterForProcedure(string sqlText)
     {
         var rgx = new System.Text.RegularExpressions.Regex(@"(?is)^\s*CREATE\s+PROCEDURE\b");
@@ -228,7 +220,7 @@ public class FirebirdUpdater
         FbConnection connection,
         string sqlText)
     {
-        var sqlToExecute = Helpers.NormalizeSqlForAdo(sqlText);
+        var sqlToExecute = Helpers.TrimTrailingSqlSemicolon(sqlText);
         if (string.IsNullOrWhiteSpace(sqlToExecute))
             return (true, null);
 
@@ -265,7 +257,7 @@ public class FirebirdUpdater
         {
             foreach (var statement in statements)
             {
-                var sql = Helpers.NormalizeSqlForAdo(statement);
+                var sql = Helpers.TrimTrailingSqlSemicolon(statement);
                 if (string.IsNullOrWhiteSpace(sql))
                     continue;
 

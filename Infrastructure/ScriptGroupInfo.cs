@@ -9,8 +9,8 @@ public enum ScriptGroup
 
 public static class ScriptGroupInfo
 {
-    private static readonly IReadOnlyDictionary<ScriptGroup, string> FolderNames =
-        new Dictionary<ScriptGroup, string>
+    private static readonly Dictionary<ScriptGroup, string> FolderNames =
+        new()
         {
             [ScriptGroup.Domain] = "domains",
             [ScriptGroup.Table] = "tables",

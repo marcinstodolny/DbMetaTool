@@ -279,10 +279,7 @@ public class FirebirdExporter
     private string SanitizeFileName(string name)
     {
         var invalidChars = Path.GetInvalidFileNameChars();
-        var result = name;
-        foreach (var invalidChar in invalidChars)
-            result = result.Replace(invalidChar, '_');
-        return result;
+        return invalidChars.Aggregate(name, (current, invalidChar) => current.Replace(invalidChar, '_'));
     }
 
     private string BuildTypeSql(
