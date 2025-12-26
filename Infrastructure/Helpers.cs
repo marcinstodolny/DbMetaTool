@@ -14,7 +14,7 @@ public static class Helpers
             .ToList();
     }
 
-    public static string NormalizeSqlForAdo(string sqlText)
+    public static string TrimTrailingSqlSemicolon(string sqlText)
     {
         var trimmed = sqlText.Trim();
 
