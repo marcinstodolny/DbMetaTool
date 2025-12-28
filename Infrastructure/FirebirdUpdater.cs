@@ -1,4 +1,6 @@
 ﻿using FirebirdSql.Data.FirebirdClient;
+using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace DbMetaTool.Infrastructure;
@@ -8,6 +10,7 @@ public class FirebirdUpdater
     private int _executedCount;
     private int _skippedCount;
     private bool _dryRun;
+    private bool _destructiveEnabled;
     private readonly List<(string File, string Error)> _failures = new();
     private readonly List<string> _addedColumns = new();
     private readonly List<string> _alteredColumns = new();
@@ -29,13 +32,18 @@ public class FirebirdUpdater
     private readonly List<string> _procedureDropCandidates = new();
     private readonly List<string> _dryRunPlanStatements = new();
     private readonly List<string> _dryRunDependencyBlocks = new();
+    private readonly List<string> _renameSuggestions = new();
 
 
     public void UpdateTwoPhases(string scriptsDirectory, FbConnection connection, bool destructiveEnabled, bool dryRun)
     {
         Helpers.EnsureOpen(connection);
         _dryRun = dryRun;
+        _destructiveEnabled = destructiveEnabled;
         if (_failures.Count > 0) return;
+
+        var existingTablesBefore = ReadExistingNames(connection, "TABLE");
+        var existingProceduresBefore = ReadExistingNames(connection, "PROCEDURE");
 
         var domainFiles = Helpers.GetSqlFiles(Path.Combine(scriptsDirectory, ScriptGroup.Domain.GetFolderName()));
         var tableFiles = Helpers.GetSqlFiles(Path.Combine(scriptsDirectory, ScriptGroup.Table.GetFolderName()));
@@ -45,6 +53,10 @@ public class FirebirdUpdater
         var targetTables = ReadTargetTablesFromFiles(tableFiles);
         if (_failures.Count > 0) return;
         var targetProcedures = ReadTargetNamesFromFiles(procedureFiles, "PROCEDURE");
+        var targetTableDefinitions = BuildTargetTableDefinitions(tableFiles);
+        if (_failures.Count > 0) return;
+        var targetProcedureDefinitions = BuildTargetProcedureDefinitions(procedureFiles);
+        if (_failures.Count > 0) return;
 
         ExecuteGroup(ScriptGroup.Domain, domainFiles, connection);
         if (_failures.Count > 0) return;
@@ -58,10 +70,18 @@ public class FirebirdUpdater
         ExecuteGroup(ScriptGroup.Procedure, procedureFiles, connection);
         if (_failures.Count > 0) return;
 
-        ApplyDeferredColumnDrops(connection, destructiveEnabled);
+        ApplyDeferredColumnDrops(connection);
         if (_failures.Count > 0) return;
 
-        DropMissingObjects(connection, targetDomains, targetTables, targetProcedures, destructiveEnabled);
+        DropMissingObjects(
+            connection,
+            targetDomains,
+            targetTables,
+            targetProcedures,
+            targetTableDefinitions,
+            targetProcedureDefinitions,
+            existingTablesBefore,
+            existingProceduresBefore);
     }
 
     public void Report()
@@ -116,6 +136,13 @@ public class FirebirdUpdater
                     Console.WriteLine("Kolumny:");
                     foreach (var col in _columnDropCandidates) Console.WriteLine($"- {col}");
                 }
+            }
+
+            if (_renameSuggestions.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Sugerowane rename:");
+                foreach (var suggestion in _renameSuggestions) Console.WriteLine($"- {suggestion}");
             }
 
             if (_failures.Count > 0)
@@ -231,6 +258,12 @@ public class FirebirdUpdater
                 foreach (var col in _columnDropCandidates) Console.WriteLine($"- {col}");
             }
         }
+        if (!_destructiveEnabled && _renameSuggestions.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Sugerowane rename:");
+            foreach (var suggestion in _renameSuggestions) Console.WriteLine($"- {suggestion}");
+        }
         if (_failures.Count <= 0) return;
         Console.WriteLine();
         Console.WriteLine("Szczegóły błędów:");
@@ -243,12 +276,12 @@ public class FirebirdUpdater
 
         throw new Exception("Update-db przerwany: wystąpiły błędy w skryptach.");
     }
-    private void ApplyDeferredColumnDrops(FbConnection connection, bool destructiveEnabled)
+    private void ApplyDeferredColumnDrops(FbConnection connection)
     {
         if (_deferredColumnDrops.Count == 0)
             return;
 
-        if (!destructiveEnabled)
+        if (!_destructiveEnabled)
         {
             foreach (var drop in _deferredColumnDrops)
                 _columnDropCandidates.Add($"{drop.TableToken}.{drop.ColumnToken}");
@@ -655,6 +688,26 @@ public class FirebirdUpdater
         return string.Join("\n", lines.Skip(index));
     }
 
+    private string NormalizeProcedureForComparison(string sqlText)
+    {
+        var withoutComments = RemoveSqlComments(sqlText);
+        var builder = new StringBuilder(withoutComments.Length);
+
+        foreach (var ch in withoutComments)
+        {
+            if (!char.IsWhiteSpace(ch))
+                builder.Append(char.ToUpperInvariant(ch));
+        }
+
+        return builder.ToString();
+    }
+
+    private string RemoveSqlComments(string sqlText)
+    {
+        var withoutBlock = Regex.Replace(sqlText, @"(?s)/\*.*?\*/", string.Empty);
+        return Regex.Replace(withoutBlock, @"--.*?(?:\r?\n|$)", " ", RegexOptions.Multiline);
+    }
+
     private string? TryExtractObjectName(string sqlText, string objectKind)
     {
         var clean = StripLeadingEmptyAndCommentLines(sqlText);
@@ -685,6 +738,63 @@ public class FirebirdUpdater
 
         return objectName.ToUpperInvariant(); 
     }
+
+    private string? ReadProcedureSource(FbConnection connection, string procedureName)
+    {
+        const string sql = @"SELECT p.RDB$PROCEDURE_SOURCE FROM RDB$PROCEDURES p WHERE TRIM(p.RDB$PROCEDURE_NAME) = @name";
+        using var cmd = new FbCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@name", procedureName);
+        var result = cmd.ExecuteScalar();
+        return result?.ToString();
+    }
+
+    private double CalculateJaccardSimilarity(IEnumerable<string> left, IEnumerable<string> right)
+    {
+        var leftSet = new HashSet<string>(left, StringComparer.OrdinalIgnoreCase);
+        var rightSet = new HashSet<string>(right, StringComparer.OrdinalIgnoreCase);
+
+        if (leftSet.Count == 0 && rightSet.Count == 0) return 1;
+        if (leftSet.Count == 0 || rightSet.Count == 0) return 0;
+
+        var intersection = leftSet.Intersect(rightSet, StringComparer.OrdinalIgnoreCase).Count();
+        var union = leftSet.Union(rightSet, StringComparer.OrdinalIgnoreCase).Count();
+
+        return union == 0 ? 0 : (double)intersection / union;
+    }
+
+    private double CalculateLevenshteinSimilarity(string left, string right)
+    {
+        if (string.IsNullOrEmpty(left) && string.IsNullOrEmpty(right)) return 1;
+        if (string.IsNullOrEmpty(left) || string.IsNullOrEmpty(right)) return 0;
+
+        var distance = CalculateLevenshteinDistance(left, right);
+        var maxLength = Math.Max(left.Length, right.Length);
+        return maxLength == 0 ? 1 : 1.0 - (double)distance / maxLength;
+    }
+
+    private int CalculateLevenshteinDistance(string source, string target)
+    {
+        var rows = source.Length + 1;
+        var cols = target.Length + 1;
+        var distances = new int[rows, cols];
+
+        for (var i = 0; i < rows; i++) distances[i, 0] = i;
+        for (var j = 0; j < cols; j++) distances[0, j] = j;
+
+        for (var i = 1; i < rows; i++)
+        {
+            for (var j = 1; j < cols; j++)
+            {
+                var cost = source[i - 1] == target[j - 1] ? 0 : 1;
+                distances[i, j] = Math.Min(
+                    Math.Min(distances[i - 1, j] + 1, distances[i, j - 1] + 1),
+                    distances[i - 1, j - 1] + cost);
+            }
+        }
+
+        return distances[rows - 1, cols - 1];
+    }
+
     private string? TryExtractDropObjectName(string sqlText, string objectKind)
     {
         var clean = StripLeadingEmptyAndCommentLines(sqlText);
@@ -1259,6 +1369,52 @@ public class FirebirdUpdater
         return set;
     }
 
+    private Dictionary<string, ParsedTableDefinition> BuildTargetTableDefinitions(IReadOnlyList<string> files)
+    {
+        var map = new Dictionary<string, ParsedTableDefinition>(StringComparer.Ordinal);
+
+        foreach (var file in files)
+        {
+            var content = File.ReadAllText(file);
+            if (IsDropStatement(content, "TABLE"))
+                continue;
+
+            try
+            {
+                var parsed = ParseCreateTableColumns(content);
+                map[parsed.TableName] = parsed;
+            }
+            catch (Exception ex)
+            {
+                _failures.Add((file, $"Nie udało się sparsować tabeli: {ex.Message}"));
+                break;
+            }
+        }
+
+        return map;
+    }
+
+    private Dictionary<string, string> BuildTargetProcedureDefinitions(IReadOnlyList<string> files)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var file in files)
+        {
+            var content = File.ReadAllText(file);
+            if (IsDropStatement(content, "PROCEDURE"))
+                continue;
+
+            var name = TryExtractObjectName(content, "PROCEDURE");
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+
+            var normalized = NormalizeProcedureForComparison(content);
+            map[name] = normalized;
+        }
+
+        return map;
+    }
+
     private IReadOnlyCollection<string> ReadExistingNames(FbConnection connection, string objectKind)
     {
         string sql = objectKind switch
@@ -1289,7 +1445,10 @@ public class FirebirdUpdater
         IReadOnlyCollection<string> targetDomains,
         IReadOnlyCollection<string> targetTables,
         IReadOnlyCollection<string> targetProcedures,
-        bool destructiveEnabled)
+        IReadOnlyDictionary<string, ParsedTableDefinition> targetTableDefinitions,
+        IReadOnlyDictionary<string, string> targetProcedureDefinitions,
+        IReadOnlyCollection<string> existingTablesBefore,
+        IReadOnlyCollection<string> existingProceduresBefore)
     {
         var existingProcedures = ReadExistingNames(connection, "PROCEDURE");
         var existingTables = ReadExistingNames(connection, "TABLE");
@@ -1299,10 +1458,26 @@ public class FirebirdUpdater
         var tablesToDrop = existingTables.Where(t => !targetTables.Contains(t) && !IsSystemObjectName(t)).ToList();
         var domainsToDrop = existingDomains.Where(d => !targetDomains.Contains(d) && !IsSystemObjectName(d)).ToList();
 
-        if (!destructiveEnabled)
+        var newTables = targetTables.Where(t => !existingTablesBefore.Contains(t) && !IsSystemObjectName(t)).ToList();
+        var newProcedures = targetProcedures.Where(p => !existingProceduresBefore.Contains(p) && !IsSystemObjectName(p)).ToList();
+
+        var renameSkipTables = new HashSet<string>(StringComparer.Ordinal);
+        var renameSkipProcedures = new HashSet<string>(StringComparer.Ordinal);
+        BuildRenameSuggestions(
+            connection,
+            tablesToDrop,
+            proceduresToDrop,
+            newTables,
+            newProcedures,
+            targetTableDefinitions,
+            targetProcedureDefinitions,
+            renameSkipTables,
+            renameSkipProcedures);
+
+        if (!_destructiveEnabled)
         {
-            _procedureDropCandidates.AddRange(proceduresToDrop);
-            _tableDropCandidates.AddRange(tablesToDrop);
+            _procedureDropCandidates.AddRange(proceduresToDrop.Where(p => !renameSkipProcedures.Contains(p)));
+            _tableDropCandidates.AddRange(tablesToDrop.Where(t => !renameSkipTables.Contains(t)));
             _domainDropCandidates.AddRange(domainsToDrop);
 
             if (!_dryRun)
@@ -1319,6 +1494,78 @@ public class FirebirdUpdater
         DropMissingProcedures(connection, proceduresToDrop);
         DropMissingTables(connection, tablesToDrop);
         DropMissingDomains(connection, domainsToDrop);
+    }
+
+    private void BuildRenameSuggestions(
+        FbConnection connection,
+        IReadOnlyCollection<string> tablesToDrop,
+        IReadOnlyCollection<string> proceduresToDrop,
+        IReadOnlyCollection<string> newTables,
+        IReadOnlyCollection<string> newProcedures,
+        IReadOnlyDictionary<string, ParsedTableDefinition> targetTableDefinitions,
+        IReadOnlyDictionary<string, string> targetProcedureDefinitions,
+        ISet<string> renameSkipTables,
+        ISet<string> renameSkipProcedures)
+    {
+        const double similarityThreshold = 0.75;
+
+        foreach (var table in tablesToDrop)
+        {
+            var existingColumns = ReadExistingColumns(connection, table).Keys.ToList();
+            if (existingColumns.Count == 0) continue;
+
+            string? bestMatch = null;
+            double bestScore = 0;
+
+            foreach (var newTable in newTables)
+            {
+                if (!targetTableDefinitions.TryGetValue(newTable, out var parsed)) continue;
+
+                var candidateColumns = parsed.Columns.Select(c => c.ColumnName);
+                var similarity = CalculateJaccardSimilarity(existingColumns, candidateColumns);
+                if (similarity > bestScore)
+                {
+                    bestScore = similarity;
+                    bestMatch = newTable;
+                }
+            }
+
+            if (bestMatch != null && bestScore >= similarityThreshold)
+            {
+                renameSkipTables.Add(table);
+                _renameSuggestions.Add($"Sugerowane rename TABLE {table} -> {bestMatch} (podobieństwo {bestScore:P0})");
+            }
+        }
+
+        foreach (var procedure in proceduresToDrop)
+        {
+            var existingSource = ReadProcedureSource(connection, procedure);
+            if (string.IsNullOrWhiteSpace(existingSource)) continue;
+
+            var normalizedExisting = NormalizeProcedureForComparison(existingSource);
+
+            string? bestMatch = null;
+            double bestScore = 0;
+
+            foreach (var newProcedure in newProcedures)
+            {
+                if (!targetProcedureDefinitions.TryGetValue(newProcedure, out var normalizedNew))
+                    continue;
+
+                var similarity = CalculateLevenshteinSimilarity(normalizedExisting, normalizedNew);
+                if (similarity > bestScore)
+                {
+                    bestScore = similarity;
+                    bestMatch = newProcedure;
+                }
+            }
+
+            if (bestMatch != null && bestScore >= similarityThreshold)
+            {
+                renameSkipProcedures.Add(procedure);
+                _renameSuggestions.Add($"Sugerowane rename PROCEDURE {procedure} -> {bestMatch} (podobieństwo {bestScore:P0})");
+            }
+        }
     }
 
     private void DropMissingProcedures(FbConnection connection, List<string> proceduresToDrop)
