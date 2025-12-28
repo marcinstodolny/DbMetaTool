@@ -115,8 +115,9 @@ namespace DbMetaTool
             using var connection = Helpers.CreateAndOpenConnection(connectionString);
 
             var firebirdUpdater = new FirebirdUpdater();
+            var destructiveEnabled = string.Equals(Environment.GetEnvironmentVariable("FB_DESTRUCTIVE"), "1", StringComparison.Ordinal);
 
-            firebirdUpdater.UpdateTwoPhases(scriptsDirectory, connection);
+            firebirdUpdater.UpdateTwoPhases(scriptsDirectory, connection, destructiveEnabled);
 
             firebirdUpdater.Report();
         }

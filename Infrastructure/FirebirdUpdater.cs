@@ -22,8 +22,13 @@ public class FirebirdUpdater
     private readonly List<string> _droppedDomains = new();
     private readonly List<(string Statement, string TableToken, string TableName, string ColumnToken, string ColumnName)> _deferredColumnDrops = new();
     private readonly HashSet<string> _deferredColumnDropKeys = new(StringComparer.Ordinal);
+    private readonly List<string> _columnDropCandidates = new();
+    private readonly List<string> _domainDropCandidates = new();
+    private readonly List<string> _tableDropCandidates = new();
+    private readonly List<string> _procedureDropCandidates = new();
+    
 
-    public void UpdateTwoPhases(string scriptsDirectory, FbConnection connection)
+    public void UpdateTwoPhases(string scriptsDirectory, FbConnection connection, bool destructiveEnabled)
     {
         Helpers.EnsureOpen(connection);
         if (_failures.Count > 0) return;
@@ -49,10 +54,10 @@ public class FirebirdUpdater
         ExecuteGroup(ScriptGroup.Procedure, procedureFiles, connection);
         if (_failures.Count > 0) return;
 
-        ApplyDeferredColumnDrops(connection);
+        ApplyDeferredColumnDrops(connection, destructiveEnabled);
         if (_failures.Count > 0) return;
 
-        DropMissingObjects(connection, targetDomains, targetTables, targetProcedures);
+        DropMissingObjects(connection, targetDomains, targetTables, targetProcedures, destructiveEnabled);
     }
 
     public void UpdateGroup(string scriptsDirectory, FbConnection connection, ScriptGroup scriptGroup)
@@ -144,6 +149,31 @@ public class FirebirdUpdater
             Console.WriteLine("Usunięte kolumny:");
             foreach (var col in _droppedColumns) Console.WriteLine($"- {col}");
         }
+        if (_domainDropCandidates.Count > 0 || _tableDropCandidates.Count > 0 || _procedureDropCandidates.Count > 0 || _columnDropCandidates.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Kandydaci do usunięcia (destrukcja wyłączona - zmienna FB_DESTRUCTIVE != 1):");
+            if (_domainDropCandidates.Count > 0)
+            {
+                Console.WriteLine("Domeny:");
+                foreach (var dom in _domainDropCandidates) Console.WriteLine($"- {dom}");
+            }
+            if (_tableDropCandidates.Count > 0)
+            {
+                Console.WriteLine("Tabele:");
+                foreach (var tbl in _tableDropCandidates) Console.WriteLine($"- {tbl}");
+            }
+            if (_procedureDropCandidates.Count > 0)
+            {
+                Console.WriteLine("Procedury:");
+                foreach (var proc in _procedureDropCandidates) Console.WriteLine($"- {proc}");
+            }
+            if (_columnDropCandidates.Count > 0)
+            {
+                Console.WriteLine("Kolumny:");
+                foreach (var col in _columnDropCandidates) Console.WriteLine($"- {col}");
+            }
+        }
         if (_failures.Count <= 0) return;
         Console.WriteLine();
         Console.WriteLine("Szczegóły błędów:");
@@ -156,10 +186,27 @@ public class FirebirdUpdater
 
         throw new Exception("Update-db przerwany: wystąpiły błędy w skryptach.");
     }
-    private void ApplyDeferredColumnDrops(FbConnection connection)
+    private void ApplyDeferredColumnDrops(FbConnection connection, bool destructiveEnabled)
     {
         if (_deferredColumnDrops.Count == 0)
             return;
+
+        if (!destructiveEnabled)
+        {
+            foreach (var drop in _deferredColumnDrops)
+                _columnDropCandidates.Add($"{drop.TableToken}.{drop.ColumnToken}");
+
+            Console.WriteLine();
+            Console.WriteLine("FB_DESTRUCTIVE != \"1\" - pomijam DROP brakujących kolumn (lista kandydatów w raporcie).");
+            if (_columnDropCandidates.Count == 0)
+            {
+                Console.WriteLine("Brak kandydatów do usunięcia kolumn.");
+            }
+
+            _deferredColumnDrops.Clear();
+            _deferredColumnDropKeys.Clear();
+            return;
+        }
 
         var blocked = new List<string>();
         var toExecute = new List<string>();
@@ -1118,7 +1165,8 @@ public class FirebirdUpdater
         FbConnection connection,
         IReadOnlyCollection<string> targetDomains,
         IReadOnlyCollection<string> targetTables,
-        IReadOnlyCollection<string> targetProcedures)
+        IReadOnlyCollection<string> targetProcedures,
+        bool destructiveEnabled)
     {
         var existingProcedures = ReadExistingNames(connection, "PROCEDURE");
         var existingTables = ReadExistingNames(connection, "TABLE");
@@ -1127,6 +1175,20 @@ public class FirebirdUpdater
         var proceduresToDrop = existingProcedures.Where(p => !targetProcedures.Contains(p) && !IsSystemObjectName(p)).ToList();
         var tablesToDrop = existingTables.Where(t => !targetTables.Contains(t) && !IsSystemObjectName(t)).ToList();
         var domainsToDrop = existingDomains.Where(d => !targetDomains.Contains(d) && !IsSystemObjectName(d)).ToList();
+
+        if (!destructiveEnabled)
+        {
+            _procedureDropCandidates.AddRange(proceduresToDrop);
+            _tableDropCandidates.AddRange(tablesToDrop);
+            _domainDropCandidates.AddRange(domainsToDrop);
+
+            Console.WriteLine();
+            Console.WriteLine("FB_DESTRUCTIVE != \"1\" - pomijam DROP brakujących obiektów (lista kandydatów w raporcie).");
+            if (_procedureDropCandidates.Count == 0 && _tableDropCandidates.Count == 0 && _domainDropCandidates.Count == 0)
+                Console.WriteLine("Brak kandydatów do usunięcia.");
+
+            return;
+        }
 
         DropMissingProcedures(connection, proceduresToDrop);
         DropMissingTables(connection, tablesToDrop);
