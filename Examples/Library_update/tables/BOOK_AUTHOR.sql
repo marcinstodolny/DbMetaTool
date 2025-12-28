@@ -1,0 +1,5 @@
+CREATE TABLE "BOOK_AUTHOR"
+(
+  "BOOK_ID" "D_ID",
+  "AUTHOR_ID" "D_ID"
+);
