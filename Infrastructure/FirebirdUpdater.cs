@@ -7,6 +7,7 @@ public class FirebirdUpdater
 {
     private int _executedCount;
     private int _skippedCount;
+    private bool _dryRun;
     private readonly List<(string File, string Error)> _failures = new();
     private readonly List<string> _addedColumns = new();
     private readonly List<string> _alteredColumns = new();
@@ -26,11 +27,14 @@ public class FirebirdUpdater
     private readonly List<string> _domainDropCandidates = new();
     private readonly List<string> _tableDropCandidates = new();
     private readonly List<string> _procedureDropCandidates = new();
-    
+    private readonly List<string> _dryRunPlanStatements = new();
+    private readonly List<string> _dryRunDependencyBlocks = new();
 
-    public void UpdateTwoPhases(string scriptsDirectory, FbConnection connection, bool destructiveEnabled)
+
+    public void UpdateTwoPhases(string scriptsDirectory, FbConnection connection, bool destructiveEnabled, bool dryRun)
     {
         Helpers.EnsureOpen(connection);
+        _dryRun = dryRun;
         if (_failures.Count > 0) return;
 
         var domainFiles = Helpers.GetSqlFiles(Path.Combine(scriptsDirectory, ScriptGroup.Domain.GetFolderName()));
@@ -60,16 +64,6 @@ public class FirebirdUpdater
         DropMissingObjects(connection, targetDomains, targetTables, targetProcedures, destructiveEnabled);
     }
 
-    public void UpdateGroup(string scriptsDirectory, FbConnection connection, ScriptGroup scriptGroup)
-    {
-        Helpers.EnsureOpen(connection);
-        if (_failures.Count > 0) return;
-        var groupDirectory = Path.Combine(scriptsDirectory, scriptGroup.GetFolderName());
-        var groupFiles = Helpers.GetSqlFiles(groupDirectory);
-
-        ExecuteGroup(scriptGroup, groupFiles, connection);
-    }
-
     public void Report()
     {
         Console.WriteLine();
@@ -77,6 +71,69 @@ public class FirebirdUpdater
         Console.WriteLine($"Wykonane: {_executedCount}");
         Console.WriteLine($"Pominięte: {_skippedCount}");
         Console.WriteLine($"Błędy: {_failures.Count}");
+        if (_dryRun)
+        {
+            Console.WriteLine();
+            Console.WriteLine("TRYB DRY-RUN");
+            Console.WriteLine("Plan:");
+            if (_dryRunPlanStatements.Count > 0)
+            {
+                foreach (var stmt in _dryRunPlanStatements) Console.WriteLine($"- {stmt}");
+            }
+            else
+            {
+                Console.WriteLine("- brak zarejestrowanych instrukcji");
+            }
+
+            if (_dryRunDependencyBlocks.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Blokady zależności:");
+                foreach (var block in _dryRunDependencyBlocks) Console.WriteLine($"- {block}");
+            }
+
+            if (_domainDropCandidates.Count > 0 || _tableDropCandidates.Count > 0 || _procedureDropCandidates.Count > 0 || _columnDropCandidates.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Kandydaci do usunięcia (destrukcja wyłączona - zmienna FB_DESTRUCTIVE != 1):");
+                if (_domainDropCandidates.Count > 0)
+                {
+                    Console.WriteLine("Domeny:");
+                    foreach (var dom in _domainDropCandidates) Console.WriteLine($"- {dom}");
+                }
+                if (_tableDropCandidates.Count > 0)
+                {
+                    Console.WriteLine("Tabele:");
+                    foreach (var tbl in _tableDropCandidates) Console.WriteLine($"- {tbl}");
+                }
+                if (_procedureDropCandidates.Count > 0)
+                {
+                    Console.WriteLine("Procedury:");
+                    foreach (var proc in _procedureDropCandidates) Console.WriteLine($"- {proc}");
+                }
+                if (_columnDropCandidates.Count > 0)
+                {
+                    Console.WriteLine("Kolumny:");
+                    foreach (var col in _columnDropCandidates) Console.WriteLine($"- {col}");
+                }
+            }
+
+            if (_failures.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Szczegóły błędów:");
+                foreach (var failure in _failures)
+                {
+                    Console.WriteLine($"Plik: {failure.File}");
+                    Console.WriteLine($"Błąd: {failure.Error}");
+                    Console.WriteLine();
+                }
+
+                throw new Exception("Update-db przerwany: wystąpiły błędy w skryptach.");
+            }
+
+            return;
+        }
         if (_addedDomains.Count > 0)
         {
             Console.WriteLine();
@@ -196,11 +253,14 @@ public class FirebirdUpdater
             foreach (var drop in _deferredColumnDrops)
                 _columnDropCandidates.Add($"{drop.TableToken}.{drop.ColumnToken}");
 
-            Console.WriteLine();
-            Console.WriteLine("FB_DESTRUCTIVE != \"1\" - pomijam DROP brakujących kolumn (lista kandydatów w raporcie).");
-            if (_columnDropCandidates.Count == 0)
+            if (!_dryRun)
             {
-                Console.WriteLine("Brak kandydatów do usunięcia kolumn.");
+                Console.WriteLine();
+                Console.WriteLine("FB_DESTRUCTIVE != \"1\" - pomijam DROP brakujących kolumn (lista kandydatów w raporcie).");
+                if (_columnDropCandidates.Count == 0)
+                {
+                    Console.WriteLine("Brak kandydatów do usunięcia kolumn.");
+                }
             }
 
             _deferredColumnDrops.Clear();
@@ -237,12 +297,19 @@ public class FirebirdUpdater
                     if (toExecuteSet.Contains(drop.Statement))
                         _droppedColumns.Add($"{drop.TableToken}.{drop.ColumnToken}");
                 }
-                _executedCount += toExecute.Count;
+                if (!_dryRun)
+                    _executedCount += toExecute.Count;
             }
         }
 
         foreach (var b in blocked)
-            _failures.Add(("", $"Pominięto DROP kolumny {b}: istnieją zależne obiekty."));
+        {
+            var message = $"Pominięto DROP kolumny {b}: istnieją zależne obiekty.";
+            if (_dryRun)
+                _dryRunDependencyBlocks.Add(message);
+            else
+                _failures.Add(("", message));
+        }
 
         _deferredColumnDrops.Clear();
         _deferredColumnDropKeys.Clear();
@@ -254,7 +321,8 @@ public class FirebirdUpdater
         bool procedureStubOnly = false,
         bool countAsExecutedFile = true)
     {
-        Console.WriteLine($"Update: {scriptGroup.GetFolderName()} ({files.Count} plików)");
+        if (!_dryRun)
+            Console.WriteLine($"Update: {scriptGroup.GetFolderName()} ({files.Count} plików)");
 
         foreach (var filePath in files)
         {
@@ -320,7 +388,8 @@ public class FirebirdUpdater
                         if (alterResult.Success)
                         {
                             _alteredDomains.Add(domainName + (string.IsNullOrWhiteSpace(desc) ? "" : $" ({desc})"));
-                            _executedCount++;
+                            if (!_dryRun)
+                                _executedCount++;
                             continue;
                         }
 
@@ -332,7 +401,18 @@ public class FirebirdUpdater
                     {
                         if (DomainHasDependencies(connection, domainName))
                         {
-                            _failures.Add((filePath, $"Nie można usunąć domeny {domainName}: istnieją zależne obiekty."));
+                            var message = $"Nie można usunąć domeny {domainName}: istnieją zależne obiekty.";
+                            if (_dryRun)
+                                _dryRunDependencyBlocks.Add(message);
+                            else
+                                _failures.Add((filePath, message));
+
+                            if (_dryRun)
+                            {
+                                _skippedCount++;
+                                continue;
+                            }
+
                             break;
                         }
                     }
@@ -345,7 +425,8 @@ public class FirebirdUpdater
                         else if (existedDomainBefore) _alteredDomains.Add(domainName);
                         else _addedDomains.Add(domainName);
 
-                        _executedCount++;
+                        if (!_dryRun)
+                            _executedCount++;
                         continue;
                     }
 
@@ -364,7 +445,18 @@ public class FirebirdUpdater
                 {
                     if (HasTableDependencies(connection, tableNameFromHeader))
                     {
-                        _failures.Add((filePath, $"Nie można usunąć tabeli {tableNameFromHeader}: istnieją zależne obiekty."));
+                        var message = $"Nie można usunąć tabeli {tableNameFromHeader}: istnieją zależne obiekty.";
+                        if (_dryRun)
+                            _dryRunDependencyBlocks.Add(message);
+                        else
+                            _failures.Add((filePath, message));
+
+                        if (_dryRun)
+                        {
+                            _skippedCount++;
+                            continue;
+                        }
+
                         break;
                     }
 
@@ -372,7 +464,8 @@ public class FirebirdUpdater
                     if (dropResult.Success)
                     {
                         _droppedTables.Add(tableNameFromHeader);
-                        _executedCount++;
+                        if (!_dryRun)
+                            _executedCount++;
                         continue;
                     }
 
@@ -451,7 +544,8 @@ public class FirebirdUpdater
                         _alteredColumns.AddRange(alteredThisTable);
                         if (alterStatements.Count > 0)
                             _alteredTables.Add(parsed.TableToken);
-                        _executedCount++;
+                        if (!_dryRun)
+                            _executedCount++;
                         continue;
                     }
 
@@ -490,7 +584,18 @@ public class FirebirdUpdater
                     {
                         if (HasProcedureDependencies(connection, procedureName))
                         {
-                            _failures.Add((filePath, $"Nie można usunąć procedury {procedureName}: istnieją zależne obiekty."));
+                            var message = $"Nie można usunąć procedury {procedureName}: istnieją zależne obiekty.";
+                            if (_dryRun)
+                                _dryRunDependencyBlocks.Add(message);
+                            else
+                                _failures.Add((filePath, message));
+
+                            if (_dryRun)
+                            {
+                                _skippedCount++;
+                                continue;
+                            }
+
                             break;
                         }
                     }
@@ -505,7 +610,7 @@ public class FirebirdUpdater
             var result = ExecuteSingleStatementInTransaction(connection, sqlToRun);
             if (result.Success)
             {
-                if (countAsExecutedFile) _executedCount++;
+                if (!_dryRun && countAsExecutedFile) _executedCount++;
                 if (scriptGroup == ScriptGroup.Table && tableNameFromHeader != null)
                 {
                     if (!existedTableBefore) _addedTables.Add(tableNameFromHeader);
@@ -743,6 +848,12 @@ public class FirebirdUpdater
         if (string.IsNullOrWhiteSpace(sqlToExecute))
             return (true, null);
 
+        if (_dryRun)
+        {
+            _dryRunPlanStatements.Add(sqlToExecute);
+            return (true, null);
+        }
+
         using var transaction = BeginWaitTransaction(connection);
         try
         {
@@ -777,6 +888,18 @@ public class FirebirdUpdater
         FbConnection connection,
         IReadOnlyList<string> statements)
     {
+        if (_dryRun)
+        {
+            foreach (var statement in statements)
+            {
+                var sql = Helpers.TrimTrailingSqlSemicolon(statement);
+                if (!string.IsNullOrWhiteSpace(sql))
+                    _dryRunPlanStatements.Add(sql);
+            }
+
+            return (true, null);
+        }
+
         using var transaction = BeginWaitTransaction(connection);
         using var cmd = connection.CreateCommand();
         cmd.Transaction = transaction;
@@ -1182,10 +1305,13 @@ public class FirebirdUpdater
             _tableDropCandidates.AddRange(tablesToDrop);
             _domainDropCandidates.AddRange(domainsToDrop);
 
-            Console.WriteLine();
-            Console.WriteLine("FB_DESTRUCTIVE != \"1\" - pomijam DROP brakujących obiektów (lista kandydatów w raporcie).");
-            if (_procedureDropCandidates.Count == 0 && _tableDropCandidates.Count == 0 && _domainDropCandidates.Count == 0)
-                Console.WriteLine("Brak kandydatów do usunięcia.");
+            if (!_dryRun)
+            {
+                Console.WriteLine();
+                Console.WriteLine("FB_DESTRUCTIVE != \"1\" - pomijam DROP brakujących obiektów (lista kandydatów w raporcie).");
+                if (_procedureDropCandidates.Count == 0 && _tableDropCandidates.Count == 0 && _domainDropCandidates.Count == 0)
+                    Console.WriteLine("Brak kandydatów do usunięcia.");
+            }
 
             return;
         }
@@ -1206,7 +1332,8 @@ public class FirebirdUpdater
             if (result.Success)
             {
                 _droppedProcedures.Add(proc);
-                _executedCount++;
+                if (!_dryRun)
+                    _executedCount++;
             }
             else
             {
@@ -1223,7 +1350,11 @@ public class FirebirdUpdater
         {
             if (HasTableDependencies(connection, table))
             {
-                _failures.Add(("", $"Pominięto DROP tabeli {table}: istnieją zależne obiekty."));
+                var message = $"Pominięto DROP tabeli {table}: istnieją zależne obiekty.";
+                if (_dryRun)
+                    _dryRunDependencyBlocks.Add(message);
+                else
+                    _failures.Add(("", message));
                 continue;
             }
 
@@ -1232,7 +1363,8 @@ public class FirebirdUpdater
             if (result.Success)
             {
                 _droppedTables.Add(table);
-                _executedCount++;
+                if (!_dryRun)
+                    _executedCount++;
             }
             else
             {
@@ -1249,7 +1381,11 @@ public class FirebirdUpdater
         {
             if (DomainHasDependencies(connection, domain))
             {
-                _failures.Add(("", $"Pominięto DROP domeny {domain}: istnieją zależne obiekty."));
+                var message = $"Pominięto DROP domeny {domain}: istnieją zależne obiekty.";
+                if (_dryRun)
+                    _dryRunDependencyBlocks.Add(message);
+                else
+                    _failures.Add(("", message));
                 continue;
             }
 
@@ -1258,7 +1394,8 @@ public class FirebirdUpdater
             if (result.Success)
             {
                 _droppedDomains.Add(domain);
-                _executedCount++;
+                if (!_dryRun)
+                    _executedCount++;
             }
             else
             {
