@@ -116,10 +116,7 @@ namespace DbMetaTool
 
             var firebirdUpdater = new FirebirdUpdater();
 
-            foreach (var group in ScriptGroupInfo.ExecutionOrder)
-            {
-                firebirdUpdater.UpdateGroup(scriptsDirectory, connection, group);
-            }
+            firebirdUpdater.UpdateTwoPhases(scriptsDirectory, connection);
 
             firebirdUpdater.Report();
         }
