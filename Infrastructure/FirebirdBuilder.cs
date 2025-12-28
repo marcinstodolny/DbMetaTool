@@ -227,8 +227,10 @@ public static class FirebirdBuilder
 
     private static string EnsureCreateOrAlterForProcedure(string sqlText)
     {
+        var clean = StripLeadingEmptyAndCommentLines(sqlText);
+
         return Regex.Replace(
-            sqlText,
+            clean,
             @"(?is)^\s*CREATE\s+(?:PROC|PROCEDURE)\b",
             "CREATE OR ALTER PROCEDURE");
     }
@@ -241,7 +243,9 @@ public static class FirebirdBuilder
 
     private static string? TryBuildProcedureStubSql(string sqlText)
     {
-        var match = Regex.Match(sqlText, @"(?is)^\s*CREATE\s+(OR\s+ALTER\s+)?(PROC|PROCEDURE)\s+.+?\bAS\b");
+        var clean = StripLeadingEmptyAndCommentLines(sqlText);
+
+        var match = Regex.Match(clean, @"(?is)^\s*CREATE\s+(OR\s+ALTER\s+)?(PROC|PROCEDURE)\s+.+?\bAS\b");
         if (!match.Success)
             return null;
 
@@ -250,5 +254,29 @@ public static class FirebirdBuilder
 
         stub = EnsureCreateOrAlterForProcedure(stub);
         return stub;
+    }
+
+    private static string StripLeadingEmptyAndCommentLines(string sqlText)
+    {
+        if (string.IsNullOrEmpty(sqlText))
+            return sqlText;
+
+        var withoutBom = sqlText.TrimStart('\uFEFF');
+        var lines = withoutBom.Replace("\r\n", "\n").Split('\n');
+        var index = 0;
+
+        while (index < lines.Length)
+        {
+            var line = lines[index].Trim();
+            if (line.Length == 0 || line.StartsWith("--"))
+            {
+                index++;
+                continue;
+            }
+
+            break;
+        }
+
+        return string.Join("\n", lines.Skip(index));
     }
 }

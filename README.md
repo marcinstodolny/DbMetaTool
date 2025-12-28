@@ -121,8 +121,10 @@ Jeśli w drugiej fazie wystąpi błąd body, w bazie pozostanie stub (puste body
 
 ### Zmienne środowiskowe Update
 
-* `FB_DRY_RUN` - ustaw `1`, aby wykonać tylko plan i raport (bez SQL, z listą blokad zależności / kandydatów do DROP).
-* `FB_DESTRUCTIVE` - ustaw `1`, aby zezwolić na operacje DROP (obiekty i brakujące kolumny) tam, gdzie nie ma zależności.
+* `FB_DRY_RUN=1` - tylko plan (bez SQL), z listą blokad zależności i kandydatów do DROP.
+* `FB_DESTRUCTIVE=1` - pozwala na DROP brakujących obiektów/kolumn (z kontrolą zależności). Domyślnie DROP-y są tylko raportowane.
+* `FB_DEBUG_COMPARE=1` - wypisuje szczegóły różnic (typ/default/null/validation) dla domen i kolumn.
+* `FB_RECHECK=1` - po ALTER domen/kolumn ponownie czyta metadane i raportuje, jeśli różnice nie zniknęły.
 
 Przykłady:
 
@@ -138,30 +140,42 @@ PowerShell:
 $env:FB_DRY_RUN=1; dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
 $env:FB_DESTRUCTIVE=1; dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
 $env:FB_DRY_RUN=1; $env:FB_DESTRUCTIVE=1; dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
+$env:FB_DEBUG_COMPARE=1; $env:FB_RECHECK=1; dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
 ```
 
 ## Jak działa update (zasady)
 
 * **Domains**
 
-  * jeśli domena istnieje i skrypt jest `CREATE DOMAIN`, to jest pomijany (MVP/bezpiecznie).
+  * `CREATE DOMAIN` istniejącej domeny → `ALTER DOMAIN` (TYPE/DEFAULT/NULL/VALIDATION) w jednej transakcji.
+  * DROP domeny tylko przy `FB_DESTRUCTIVE=1` i braku zależności.
 
 * **Tables**
 
-  * jeśli tabela nie istnieje: wykonuje `CREATE TABLE ...`
-  * jeśli tabela istnieje: dodaje brakujące kolumny (`ALTER TABLE ... ADD ...`) i zmienia typ/null/default istniejących kolumn (ALTER COLUMN)
-  * DROP brakujących kolumn jest wykonywany **po procedurach**, tylko gdy `FB_DESTRUCTIVE=1`, z kontrolą zależności; blokady zależności trafiają do raportu.
+  * brakująca tabela → `CREATE TABLE ...`
+  * istniejąca tabela → dodanie brakujących kolumn + `ALTER COLUMN` (typ/null/default)
+  * DROP brakujących kolumn jest wykonywany **po procedurach**, tylko gdy `FB_DESTRUCTIVE=1`, z kontrolą zależności; blokady trafiają do raportu/dry-run.
 
 * **Procedures**
 
-  * wykonywane w dwóch fazach: najpierw stub (nagłówek + puste body), potem właściwe body (`CREATE OR ALTER PROCEDURE ...`)
-  * w przypadku błędu body - popraw skrypt i uruchom `update-db` ponownie (stub pozostaje, aby zależności mogły się kompilować)
+  * dwie fazy: stub (nagłówek + puste body) → właściwe body (`CREATE OR ALTER PROCEDURE ...`)
+  * DROP z kontrolą zależności; w razie błędu body popraw skrypt i uruchom `update-db` ponownie (stub zostaje).
 
 * **DROP obiektów**
 
-  * usuwanie brakujących domen/tabel/procedur jest wykonywane tylko gdy `FB_DESTRUCTIVE=1`
-  * DROP jest pomijany, gdy istnieją zależne obiekty; informacja trafia do raportu
-  * heurystyka rename (tabele/procedury) jest tylko informacyjna - narzędzie nie wykonuje RENAME
+  * brak pliku = kandydat do DROP (domeny/tabele/procedury) - realny DROP tylko gdy `FB_DESTRUCTIVE=1`.
+  * obsługiwane są też pliki `DROP ...` w tych samych folderach (hybryda: stan docelowy + migracje).
+  * DROP pomijany przy zależnościach (raport/dry-run); heurystyka rename jest informacyjna - RENAME wykonujesz ręcznie.
+
+## Scenariusze i oczekiwane zachowanie (skrót)
+
+* Zmiana typu/default/null/validation domeny → ALTER DOMAIN (raport "Zmodyfikowane domeny").
+* Dodanie kolumny → ALTER TABLE ADD.
+* Zmiana typu/default/null kolumny → ALTER COLUMN.
+* Usunięcie kolumny → kandydat do DROP; realny DROP tylko z `FB_DESTRUCTIVE=1` i brakiem zależności.
+* Zmiana ciała procedury → CREATE OR ALTER (stuby + pełne ciała).
+* Brak zmian → pliki pominięte, plan pusty w dry-run.
+* Dry-run → tylko plan SQL + blokady zależności + kandydaci do DROP (bez modyfikacji bazy).
 
 ## Przykładowy scenariusz użycia
 
@@ -179,10 +193,11 @@ $env:FB_DRY_RUN=1; $env:FB_DESTRUCTIVE=1; dotnet run update-db --connection-stri
    dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
    ```
 
-## Known limitations (MVP)
+## Known limitations (MVP + tryby)
 
-* Operacje DROP (kolumny/obiekty) wymagają `FB_DESTRUCTIVE=1` i mogą być blokowane przez zależności - wtedy pojawią się tylko w raporcie.
+* Operacje DROP wymagają `FB_DESTRUCTIVE=1` i braku zależności; inaczej trafiają do raportu/dry-run.
 * Heurystyka rename jest wyłącznie podpowiedzią; ewentualne zmiany nazw trzeba wykonać ręcznie.
+* Hybryda "skrypty = stan docelowy" + pliki `DROP ...` - używaj destrukcji świadomie.
 * Export/Update skupia się na domenach, tabelach (kolumnach) i procedurach.
 * Skrypty powinny być "1 plik = 1 obiekt".
 

@@ -1,5 +1,4 @@
 ﻿using FirebirdSql.Data.FirebirdClient;
-using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -7,10 +6,12 @@ namespace DbMetaTool.Infrastructure;
 
 public class FirebirdUpdater
 {
-    private int _executedCount;
-    private int _skippedCount;
+    private int _executedFiles;
+    private int _executedStatements;
+    private int _skippedFiles;
     private bool _dryRun;
     private bool _destructiveEnabled;
+    private IReadOnlyDictionary<string, DomainDefinition> _targetDomainDefinitions = new Dictionary<string, DomainDefinition>(StringComparer.Ordinal);
     private readonly List<(string File, string Error)> _failures = new();
     private readonly List<string> _addedColumns = new();
     private readonly List<string> _alteredColumns = new();
@@ -33,13 +34,19 @@ public class FirebirdUpdater
     private readonly List<string> _dryRunPlanStatements = new();
     private readonly List<string> _dryRunDependencyBlocks = new();
     private readonly List<string> _renameSuggestions = new();
+    private readonly List<string> _debugCompareMessages = new();
+    private readonly List<string> _postCheckWarnings = new();
+    private bool _debugCompareEnabled;
+    private bool _recheckEnabled;
 
-
-    public void UpdateTwoPhases(string scriptsDirectory, FbConnection connection, bool destructiveEnabled, bool dryRun)
+    public void UpdateTwoPhases(string scriptsDirectory, FbConnection connection, bool destructiveEnabled, bool dryRun, bool debugCompareEnabled, bool recheckEnabled)
     {
         Helpers.EnsureOpen(connection);
         _dryRun = dryRun;
         _destructiveEnabled = destructiveEnabled;
+        _debugCompareEnabled = debugCompareEnabled;
+        _recheckEnabled = recheckEnabled;
+
         if (_failures.Count > 0) return;
 
         var existingTablesBefore = ReadExistingNames(connection, "TABLE");
@@ -49,11 +56,12 @@ public class FirebirdUpdater
         var tableFiles = Helpers.GetSqlFiles(Path.Combine(scriptsDirectory, ScriptGroup.Table.GetFolderName()));
         var procedureFiles = Helpers.GetSqlFiles(Path.Combine(scriptsDirectory, ScriptGroup.Procedure.GetFolderName()));
 
-        var targetDomains = ReadTargetNamesFromFiles(domainFiles, "DOMAIN");
+        _targetDomainDefinitions = BuildTargetDomainDefinitions(domainFiles);
+        var targetDomains = _targetDomainDefinitions.Keys.ToHashSet(StringComparer.Ordinal);
         var targetTables = ReadTargetTablesFromFiles(tableFiles);
         if (_failures.Count > 0) return;
         var targetProcedures = ReadTargetNamesFromFiles(procedureFiles, "PROCEDURE");
-        var targetTableDefinitions = BuildTargetTableDefinitions(tableFiles);
+        var targetTableDefinitions = BuildTargetTableDefinitions(tableFiles, _targetDomainDefinitions);
         if (_failures.Count > 0) return;
         var targetProcedureDefinitions = BuildTargetProcedureDefinitions(procedureFiles);
         if (_failures.Count > 0) return;
@@ -88,8 +96,9 @@ public class FirebirdUpdater
     {
         Console.WriteLine();
         Console.WriteLine("RAPORT UPDATE-DB");
-        Console.WriteLine($"Wykonane: {_executedCount}");
-        Console.WriteLine($"Pominięte: {_skippedCount}");
+        Console.WriteLine($"Wykonane pliki: {_executedFiles}");
+        Console.WriteLine($"Wykonane akcje SQL: {_executedStatements}");
+        Console.WriteLine($"Pominięte pliki: {_skippedFiles}");
         Console.WriteLine($"Błędy: {_failures.Count}");
         if (_dryRun)
         {
@@ -136,6 +145,13 @@ public class FirebirdUpdater
                     Console.WriteLine("Kolumny:");
                     foreach (var col in _columnDropCandidates) Console.WriteLine($"- {col}");
                 }
+            }
+
+            if (_debugCompareMessages.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("DEBUG COMPARE (FB_DEBUG_COMPARE=1):");
+                foreach (var msg in _debugCompareMessages) Console.WriteLine($"- {msg}");
             }
 
             if (_renameSuggestions.Count > 0)
@@ -264,6 +280,18 @@ public class FirebirdUpdater
             Console.WriteLine("Sugerowane rename:");
             foreach (var suggestion in _renameSuggestions) Console.WriteLine($"- {suggestion}");
         }
+        if (_debugCompareMessages.Count > 0 && !_dryRun)
+        {
+            Console.WriteLine();
+            Console.WriteLine("DEBUG COMPARE (FB_DEBUG_COMPARE=1):");
+            foreach (var msg in _debugCompareMessages) Console.WriteLine($"- {msg}");
+        }
+        if (_postCheckWarnings.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Ostrzeżenia po weryfikacji:");
+            foreach (var warn in _postCheckWarnings) Console.WriteLine($"- {warn}");
+        }
         if (_failures.Count <= 0) return;
         Console.WriteLine();
         Console.WriteLine("Szczegóły błędów:");
@@ -331,7 +359,7 @@ public class FirebirdUpdater
                         _droppedColumns.Add($"{drop.TableToken}.{drop.ColumnToken}");
                 }
                 if (!_dryRun)
-                    _executedCount += toExecute.Count;
+                    _executedStatements += toExecute.Count;
             }
         }
 
@@ -365,13 +393,9 @@ public class FirebirdUpdater
             var normalizedSql = StripLeadingEmptyAndCommentLines(originalSql);
             string? tableNameFromHeader = null;
             string? procedureName = null;
-            bool isDropProcedure = false;
-            bool isDropTable = false;
-            bool existedTableBefore = false;
-            bool existedProcedureBefore = false;
-            bool existedDomainBefore = false;
-            bool isDropDomain = false;
-            bool isCreateDomain = false;
+            var isDropProcedure = false;
+            var existedTableBefore = false;
+            var existedProcedureBefore = false;
             DomainDefinition? domainDefinition = null;
 
             if (scriptGroup == ScriptGroup.Domain)
@@ -379,13 +403,13 @@ public class FirebirdUpdater
                 var domainName = TryExtractObjectName(originalSql, "DOMAIN") ?? TryExtractDropObjectName(originalSql, "DOMAIN");
                 if (domainName != null)
                 {
-                    isCreateDomain = System.Text.RegularExpressions.Regex.IsMatch(
+                    var isCreateDomain = System.Text.RegularExpressions.Regex.IsMatch(
                         StripLeadingEmptyAndCommentLines(originalSql),
                         @"(?is)^\s*CREATE\s+DOMAIN\b"
                     );
 
-                    isDropDomain = IsDropStatement(normalizedSql, "DOMAIN");
-                    existedDomainBefore = DomainExists(connection, domainName);
+                    var isDropDomain = IsDropStatement(normalizedSql, "DOMAIN");
+                    var existedDomainBefore = DomainExists(connection, domainName);
 
                     if (!isDropDomain)
                     {
@@ -413,7 +437,7 @@ public class FirebirdUpdater
 
                         if (domainStatements.Count == 0)
                         {
-                            _skippedCount++;
+                            _skippedFiles++;
                             continue;
                         }
 
@@ -422,7 +446,11 @@ public class FirebirdUpdater
                         {
                             _alteredDomains.Add(domainName + (string.IsNullOrWhiteSpace(desc) ? "" : $" ({desc})"));
                             if (!_dryRun)
-                                _executedCount++;
+                            {
+                                _executedFiles++;
+                                _executedStatements += domainStatements.Count;
+                                MaybeRecheckDomain(connection, domainDefinition);
+                            }
                             continue;
                         }
 
@@ -442,7 +470,7 @@ public class FirebirdUpdater
 
                             if (_dryRun)
                             {
-                                _skippedCount++;
+                                _skippedFiles++;
                                 continue;
                             }
 
@@ -459,7 +487,10 @@ public class FirebirdUpdater
                         else _addedDomains.Add(domainName);
 
                         if (!_dryRun)
-                            _executedCount++;
+                        {
+                            _executedStatements++;
+                            _executedFiles++;
+                        }
                         continue;
                     }
 
@@ -469,7 +500,7 @@ public class FirebirdUpdater
             }
             else if (scriptGroup == ScriptGroup.Table)
             {
-                isDropTable = IsDropStatement(normalizedSql, "TABLE");
+                var isDropTable = IsDropStatement(normalizedSql, "TABLE");
                 tableNameFromHeader = TryExtractObjectName(originalSql, "TABLE") ?? TryExtractDropObjectName(originalSql, "TABLE");
                 if (tableNameFromHeader != null)
                     existedTableBefore = TableExists(connection, tableNameFromHeader);
@@ -486,7 +517,7 @@ public class FirebirdUpdater
 
                         if (_dryRun)
                         {
-                            _skippedCount++;
+                            _skippedFiles++;
                             continue;
                         }
 
@@ -498,7 +529,10 @@ public class FirebirdUpdater
                     {
                         _droppedTables.Add(tableNameFromHeader);
                         if (!_dryRun)
-                            _executedCount++;
+                        {
+                            _executedStatements++;
+                            _executedFiles++;
+                        }
                         continue;
                     }
 
@@ -510,7 +544,7 @@ public class FirebirdUpdater
                 {
                     try
                     {
-                        var parsed = ParseCreateTableColumns(originalSql);
+                        var parsed = ParseCreateTableColumns(originalSql, _targetDomainDefinitions);
                         tableNameFromHeader = parsed.TableName;
                         existedTableBefore = TableExists(connection, tableNameFromHeader);
                     }
@@ -523,7 +557,7 @@ public class FirebirdUpdater
 
                 if (tableNameFromHeader != null && existedTableBefore)
                 {
-                    var parsed = ParseCreateTableColumns(originalSql);
+                    var parsed = ParseCreateTableColumns(originalSql, _targetDomainDefinitions);
                     var existingColumns = ReadExistingColumns(connection, parsed.TableName);
 
                     var alterStatements = new List<string>();
@@ -566,7 +600,7 @@ public class FirebirdUpdater
 
                     if (alterStatements.Count == 0)
                     {
-                        _skippedCount++;
+                        _skippedFiles++;
                         continue;
                     }
 
@@ -578,7 +612,11 @@ public class FirebirdUpdater
                         if (alterStatements.Count > 0)
                             _alteredTables.Add(parsed.TableToken);
                         if (!_dryRun)
-                            _executedCount++;
+                        {
+                            _executedFiles++;
+                            _executedStatements += alterStatements.Count;
+                            MaybeRecheckTable(connection, parsed);
+                        }
                         continue;
                     }
 
@@ -595,7 +633,7 @@ public class FirebirdUpdater
 
                 if (procedureStubOnly && isDropProcedure)
                 {
-                    _skippedCount++;
+                    _skippedFiles++;
                     continue;
                 }
 
@@ -625,7 +663,7 @@ public class FirebirdUpdater
 
                             if (_dryRun)
                             {
-                                _skippedCount++;
+                                _skippedFiles++;
                                 continue;
                             }
 
@@ -643,7 +681,11 @@ public class FirebirdUpdater
             var result = ExecuteSingleStatementInTransaction(connection, sqlToRun);
             if (result.Success)
             {
-                if (!_dryRun && countAsExecutedFile) _executedCount++;
+                if (!_dryRun)
+                {
+                    _executedStatements++;
+                    if (countAsExecutedFile) _executedFiles++;
+                }
                 if (scriptGroup == ScriptGroup.Table && tableNameFromHeader != null)
                 {
                     if (!existedTableBefore) _addedTables.Add(tableNameFromHeader);
@@ -669,7 +711,8 @@ public class FirebirdUpdater
 
     private string StripLeadingEmptyAndCommentLines(string sqlText)
     {
-        var lines = sqlText.Replace("\r\n", "\n").Split('\n');
+        var withoutBom = sqlText.TrimStart('\uFEFF');
+        var lines = withoutBom.Replace("\r\n", "\n").Split('\n');
         var index = 0;
 
         while (index < lines.Length)
@@ -864,7 +907,8 @@ public class FirebirdUpdater
         var remainder = keywordIndex >= 0 ? rest[keywordIndex..].Trim() : string.Empty;
 
         var defaultExpression = ExtractDefaultExpression(remainder, out var remainderWithoutDefault);
-        var isNullable = DetermineNullability(remainderWithoutDefault);
+        var validationExpression = ExtractValidationExpression(remainderWithoutDefault, out var remainderWithoutValidation);
+        var (isNullable, _) = DetermineNullability(remainderWithoutValidation);
 
         var typeDefinition = ParseTypeSql(typeSql);
 
@@ -872,7 +916,8 @@ public class FirebirdUpdater
             domainName,
             typeDefinition,
             isNullable,
-            NormalizeDefaultExpression(defaultExpression));
+            NormalizeDefaultExpression(defaultExpression),
+            NormalizeValidationExpression(validationExpression));
     }
     private bool HasTableDependencies(FbConnection connection, string tableName)
     {
@@ -1040,7 +1085,7 @@ public class FirebirdUpdater
         }
     }
 
-    private ParsedTableDefinition ParseCreateTableColumns(string sqlText)
+    private ParsedTableDefinition ParseCreateTableColumns(string sqlText, IReadOnlyDictionary<string, DomainDefinition> domainDefinitions)
     {
         var clean = StripLeadingEmptyAndCommentLines(sqlText);
 
@@ -1153,7 +1198,25 @@ public class FirebirdUpdater
             columns.Add(ParseColumnDefinition(columnToken, columnName, definitionSql));
         }
 
-        return new ParsedTableDefinition(tableToken, tableName, columns);
+        // uzupełnij kolumny o null/default z domen, jeśli brak explicit
+        var adjustedColumns = new List<ColumnDefinition>();
+        foreach (var column in columns)
+        {
+            if (column.Type.IsDomain &&
+                !column.HasExplicitNullability &&
+                domainDefinitions.TryGetValue(column.Type.DomainName!, out var domainDef))
+            {
+                var isNullable = domainDef.IsNullable;
+                var defaultExpr = column.DefaultExpression ?? domainDef.DefaultExpression;
+                adjustedColumns.Add(column with { IsNullable = isNullable, DefaultExpression = defaultExpr });
+            }
+            else
+            {
+                adjustedColumns.Add(column);
+            }
+        }
+
+        return new ParsedTableDefinition(tableToken, tableName, adjustedColumns);
     }
 
     private string NormalizeIdentifierForComparison(string identifierToken)
@@ -1235,7 +1298,8 @@ public class FirebirdUpdater
                 string.Empty,
                 typeDefinition,
                 isNullable,
-                defaultSql);
+                defaultSql,
+                true);
         }
 
         return result;
@@ -1255,6 +1319,7 @@ public class FirebirdUpdater
                 COALESCE(f.RDB$CHARACTER_LENGTH, f.RDB$FIELD_LENGTH) AS CHAR_LEN,
                 cs.RDB$CHARACTER_SET_NAME AS CHARSET_NAME,
                 f.RDB$DEFAULT_SOURCE AS DEFAULT_SOURCE,
+                f.RDB$VALIDATION_SOURCE AS VALIDATION_SOURCE,
                 f.RDB$NULL_FLAG AS NULL_FLAG
             FROM RDB$FIELDS f
             LEFT JOIN RDB$CHARACTER_SETS cs ON cs.RDB$CHARACTER_SET_ID = f.RDB$CHARACTER_SET_ID
@@ -1288,8 +1353,10 @@ public class FirebirdUpdater
 
         var isNullable = (nullFlag ?? 0) != 1;
         var defaultSql = NormalizeDefaultExpression(defaultSource);
+        var validationSource = Convert.ToString(reader["VALIDATION_SOURCE"]);
+        var validationSql = NormalizeValidationExpression(validationSource);
 
-        return new DomainDefinition(domainName, typeDefinition, isNullable, defaultSql);
+        return new DomainDefinition(domainName, typeDefinition, isNullable, defaultSql, validationSql);
     }
 
     private (IReadOnlyList<string> Statements, string ChangeDescription) BuildAlterStatementsForDomain(
@@ -1302,12 +1369,14 @@ public class FirebirdUpdater
 
         if (!ColumnTypeEquals(desired.Type, existing.Type))
         {
+            LogDebugDifference($"DOMAIN {desired.DomainName}: typ desired={DescribeType(desired.Type)} vs actual={DescribeType(existing.Type)}");
             statements.Add($"ALTER DOMAIN {domainToken} TYPE {desired.Type.TypeSql}");
             changes.Add("typ");
         }
 
         if (!DefaultEquals(desired.DefaultExpression, existing.DefaultExpression))
         {
+            LogDebugDifference($"DOMAIN {desired.DomainName}: default desired={DescribeDefault(desired.DefaultExpression)} vs actual={DescribeDefault(existing.DefaultExpression)}");
             var sql = desired.DefaultExpression == null
                 ? $"ALTER DOMAIN {domainToken} DROP DEFAULT"
                 : $"ALTER DOMAIN {domainToken} SET DEFAULT {desired.DefaultExpression}";
@@ -1317,11 +1386,27 @@ public class FirebirdUpdater
 
         if (desired.IsNullable != existing.IsNullable)
         {
+            LogDebugDifference($"DOMAIN {desired.DomainName}: null desired={DescribeNullability(desired.IsNullable)} vs actual={DescribeNullability(existing.IsNullable)}");
             var sql = desired.IsNullable
                 ? $"ALTER DOMAIN {domainToken} DROP NOT NULL"
                 : $"ALTER DOMAIN {domainToken} SET NOT NULL";
             statements.Add(sql);
             changes.Add("null");
+        }
+
+        if (!ValidationEquals(desired.ValidationExpression, existing.ValidationExpression))
+        {
+            LogDebugDifference($"DOMAIN {desired.DomainName}: validation desired={DescribeValidation(desired.ValidationExpression)} vs actual={DescribeValidation(existing.ValidationExpression)}");
+            if (existing.ValidationExpression != null)
+            {
+                statements.Add($"ALTER DOMAIN {domainToken} DROP CONSTRAINT");
+            }
+            if (desired.ValidationExpression != null)
+            {
+                statements.Add($"ALTER DOMAIN {domainToken} ADD {desired.ValidationExpression}");
+            }
+
+            changes.Add("validation");
         }
 
         var changeDescription = changes.Count == 0 ? string.Empty : string.Join("/", changes);
@@ -1341,6 +1426,35 @@ public class FirebirdUpdater
         return set;
     }
 
+    private IReadOnlyDictionary<string, DomainDefinition> BuildTargetDomainDefinitions(IReadOnlyList<string> files)
+    {
+        var map = new Dictionary<string, DomainDefinition>(StringComparer.Ordinal);
+
+        foreach (var file in files)
+        {
+            var content = File.ReadAllText(file);
+            if (IsDropStatement(content, "DOMAIN"))
+                continue;
+
+            var domainName = TryExtractObjectName(content, "DOMAIN");
+            if (string.IsNullOrWhiteSpace(domainName))
+                continue;
+
+            try
+            {
+                var parsed = ParseDomainDefinition(content, domainName);
+                map[domainName] = parsed;
+            }
+            catch (Exception ex)
+            {
+                _failures.Add((file, $"Nie udało się sparsować domeny: {ex.Message}"));
+                break;
+            }
+        }
+
+        return map;
+    }
+
     private IReadOnlyCollection<string> ReadTargetTablesFromFiles(IReadOnlyList<string> files)
     {
         var set = new HashSet<string>(StringComparer.Ordinal);
@@ -1356,7 +1470,7 @@ public class FirebirdUpdater
 
             try
             {
-                var parsed = ParseCreateTableColumns(content);
+                var parsed = ParseCreateTableColumns(content, _targetDomainDefinitions);
                 set.Add(parsed.TableName);
             }
             catch (Exception ex)
@@ -1369,7 +1483,7 @@ public class FirebirdUpdater
         return set;
     }
 
-    private Dictionary<string, ParsedTableDefinition> BuildTargetTableDefinitions(IReadOnlyList<string> files)
+    private Dictionary<string, ParsedTableDefinition> BuildTargetTableDefinitions(IReadOnlyList<string> files, IReadOnlyDictionary<string, DomainDefinition> domainDefinitions)
     {
         var map = new Dictionary<string, ParsedTableDefinition>(StringComparer.Ordinal);
 
@@ -1381,7 +1495,7 @@ public class FirebirdUpdater
 
             try
             {
-                var parsed = ParseCreateTableColumns(content);
+                var parsed = ParseCreateTableColumns(content, domainDefinitions);
                 map[parsed.TableName] = parsed;
             }
             catch (Exception ex)
@@ -1417,7 +1531,7 @@ public class FirebirdUpdater
 
     private IReadOnlyCollection<string> ReadExistingNames(FbConnection connection, string objectKind)
     {
-        string sql = objectKind switch
+        var sql = objectKind switch
         {
             "DOMAIN" => @"SELECT TRIM(f.RDB$FIELD_NAME) AS NAME FROM RDB$FIELDS f WHERE (f.RDB$SYSTEM_FLAG IS NULL OR f.RDB$SYSTEM_FLAG = 0)",
             "TABLE" => @"SELECT TRIM(r.RDB$RELATION_NAME) AS NAME FROM RDB$RELATIONS r WHERE (r.RDB$SYSTEM_FLAG IS NULL OR r.RDB$SYSTEM_FLAG = 0) AND r.RDB$VIEW_BLR IS NULL",
@@ -1574,13 +1688,26 @@ public class FirebirdUpdater
 
         foreach (var proc in proceduresToDrop)
         {
+            if (HasProcedureDependencies(connection, proc))
+            {
+                var message = $"Pominięto DROP procedury {proc}: istnieją zależne obiekty.";
+                if (_dryRun)
+                    _dryRunDependencyBlocks.Add(message);
+                else
+                    _failures.Add(("", message));
+                continue;
+            }
+
             var stmt = $"DROP PROCEDURE {BuildIdentifierToken(proc)}";
             var result = ExecuteSingleStatementInTransaction(connection, stmt);
             if (result.Success)
             {
                 _droppedProcedures.Add(proc);
                 if (!_dryRun)
-                    _executedCount++;
+                {
+                    _executedStatements++;
+                    _executedFiles++;
+                }
             }
             else
             {
@@ -1611,7 +1738,10 @@ public class FirebirdUpdater
             {
                 _droppedTables.Add(table);
                 if (!_dryRun)
-                    _executedCount++;
+                {
+                    _executedStatements++;
+                    _executedFiles++;
+                }
             }
             else
             {
@@ -1642,7 +1772,10 @@ public class FirebirdUpdater
             {
                 _droppedDomains.Add(domain);
                 if (!_dryRun)
-                    _executedCount++;
+                {
+                    _executedStatements++;
+                    _executedFiles++;
+                }
             }
             else
             {
@@ -1661,12 +1794,14 @@ public class FirebirdUpdater
 
         if (!ColumnTypeEquals(desired.Type, existing.Type))
         {
+            LogDebugDifference($"COLUMN {tableToken}.{desired.ColumnToken}: typ desired={DescribeType(desired.Type)} vs actual={DescribeType(existing.Type)}");
             statements.Add($"ALTER TABLE {tableToken} ALTER COLUMN {desired.ColumnToken} TYPE {desired.Type.TypeSql}");
             changes.Add("typ");
         }
 
         if (desired.IsNullable != existing.IsNullable)
         {
+            LogDebugDifference($"COLUMN {tableToken}.{desired.ColumnToken}: null desired={DescribeNullability(desired.IsNullable)} vs actual={DescribeNullability(existing.IsNullable)}");
             var sql = desired.IsNullable
                 ? $"ALTER TABLE {tableToken} ALTER COLUMN {desired.ColumnToken} DROP NOT NULL"
                 : $"ALTER TABLE {tableToken} ALTER COLUMN {desired.ColumnToken} SET NOT NULL";
@@ -1677,6 +1812,7 @@ public class FirebirdUpdater
 
         if (!DefaultEquals(desired.DefaultExpression, existing.DefaultExpression))
         {
+            LogDebugDifference($"COLUMN {tableToken}.{desired.ColumnToken}: default desired={DescribeDefault(desired.DefaultExpression)} vs actual={DescribeDefault(existing.DefaultExpression)}");
             var sql = desired.DefaultExpression == null
                 ? $"ALTER TABLE {tableToken} ALTER COLUMN {desired.ColumnToken} DROP DEFAULT"
                 : $"ALTER TABLE {tableToken} ALTER COLUMN {desired.ColumnToken} SET DEFAULT {desired.DefaultExpression}";
@@ -1692,6 +1828,9 @@ public class FirebirdUpdater
     private bool DefaultEquals(string? left, string? right) =>
         string.Equals(NormalizeDefaultExpression(left), NormalizeDefaultExpression(right), StringComparison.OrdinalIgnoreCase);
 
+    private bool ValidationEquals(string? left, string? right) =>
+        string.Equals(NormalizeValidationExpression(left), NormalizeValidationExpression(right), StringComparison.OrdinalIgnoreCase);
+
     private ColumnDefinition ParseColumnDefinition(string columnToken, string columnName, string definitionSql)
     {
         var keywordIndex = FindFirstKeywordIndex(definitionSql);
@@ -1699,7 +1838,7 @@ public class FirebirdUpdater
         var remainder = keywordIndex >= 0 ? definitionSql[keywordIndex..].Trim() : string.Empty;
 
         var defaultExpression = ExtractDefaultExpression(remainder, out var remainderWithoutDefault);
-        var isNullable = DetermineNullability(remainderWithoutDefault);
+        var (isNullable, hasExplicitNullability) = DetermineNullability(remainderWithoutDefault);
 
         var typeDefinition = ParseTypeSql(typeSql);
         return new ColumnDefinition(
@@ -1708,7 +1847,8 @@ public class FirebirdUpdater
             definitionSql,
             typeDefinition,
             isNullable,
-            NormalizeDefaultExpression(defaultExpression));
+            NormalizeDefaultExpression(defaultExpression),
+            hasExplicitNullability);
     }
 
     private int FindFirstKeywordIndex(string definitionSql)
@@ -1766,15 +1906,30 @@ public class FirebirdUpdater
         return match.Groups["expr"].Value.Trim();
     }
 
-    private bool DetermineNullability(string text)
+    private string? ExtractValidationExpression(string text, out string remainderWithoutValidation)
     {
-        if (Regex.IsMatch(text, @"(?is)\bNOT\s+NULL\b"))
-            return false;
+        var match = Regex.Match(text, @"(?is)\b(CONSTRAINT\s+(""[^""]+""|\w+)\s+)?CHECK\s*\(.*?\)");
+        if (!match.Success)
+        {
+            remainderWithoutValidation = text;
+            return null;
+        }
 
-        if (Regex.IsMatch(text, @"(?is)\bNULL\b"))
-            return true;
+        remainderWithoutValidation = (text[..match.Index] + text[(match.Index + match.Length)..]).Trim();
+        return match.Value.Trim();
+    }
 
-        return true;
+    private (bool IsNullable, bool HasExplicitNullability) DetermineNullability(string text)
+    {
+        var notNullMatch = Regex.IsMatch(text, @"(?is)\bNOT\s+NULL\b");
+        if (notNullMatch)
+            return (false, true);
+
+        var nullMatch = Regex.IsMatch(text, @"(?is)\bNULL\b");
+        if (nullMatch)
+            return (true, true);
+
+        return (true, false);
     }
 
     private ColumnTypeDefinition ParseTypeSql(string typeSql)
@@ -2039,12 +2194,17 @@ public class FirebirdUpdater
                    string.Equals(left.DomainName, right.DomainName, StringComparison.Ordinal);
         }
 
+        var charsetEquals =
+            string.IsNullOrWhiteSpace(left.CharacterSet) ||
+            string.IsNullOrWhiteSpace(right.CharacterSet) ||
+            string.Equals(left.CharacterSet, right.CharacterSet, StringComparison.OrdinalIgnoreCase);
+
         return string.Equals(left.NormalizedTypeName, right.NormalizedTypeName, StringComparison.OrdinalIgnoreCase)
                && left.Length == right.Length
                && left.Precision == right.Precision
                && left.Scale == right.Scale
                && left.SubType == right.SubType
-               && string.Equals(left.CharacterSet ?? string.Empty, right.CharacterSet ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+               && charsetEquals;
     }
 
     private string? NormalizeDefaultExpression(string? expression)
@@ -2062,6 +2222,94 @@ public class FirebirdUpdater
         }
 
         return trimmed;
+    }
+
+    private string? NormalizeValidationExpression(string? expression)
+    {
+        if (string.IsNullOrWhiteSpace(expression))
+            return null;
+
+        var trimmed = Helpers.TrimTrailingSqlSemicolon(expression.Trim());
+        trimmed = Regex.Replace(trimmed, @"\s+", " ").Trim();
+        if (trimmed.StartsWith("CHECK", StringComparison.OrdinalIgnoreCase))
+            return trimmed;
+
+        if (trimmed.StartsWith("CONSTRAINT", StringComparison.OrdinalIgnoreCase))
+            return trimmed;
+
+        return trimmed;
+    }
+
+    private string DescribeType(ColumnTypeDefinition type) =>
+        type.IsDomain
+            ? $"DOMAIN {type.DomainName}"
+            : type.TypeSql;
+
+    private string DescribeDefault(string? expression) =>
+        string.IsNullOrWhiteSpace(expression) ? "<brak>" : expression.Trim();
+
+    private string DescribeValidation(string? expression) =>
+        string.IsNullOrWhiteSpace(expression) ? "<brak>" : NormalizeValidationExpression(expression)!;
+
+    private string DescribeNullability(bool isNullable) =>
+        isNullable ? "NULL" : "NOT NULL";
+
+    private void LogDebugDifference(string message)
+    {
+        if (_debugCompareEnabled)
+            _debugCompareMessages.Add(message);
+    }
+
+    private void MaybeRecheckDomain(FbConnection connection, DomainDefinition desired)
+    {
+        if (!_recheckEnabled || _dryRun)
+            return;
+
+        try
+        {
+            var after = ReadExistingDomain(connection, desired.DomainName);
+            if (!ColumnTypeEquals(desired.Type, after.Type) ||
+                !DefaultEquals(desired.DefaultExpression, after.DefaultExpression) ||
+                desired.IsNullable != after.IsNullable ||
+                !ValidationEquals(desired.ValidationExpression, after.ValidationExpression))
+            {
+                _postCheckWarnings.Add($"Po ALTER DOMAIN {desired.DomainName} wartości nadal różnią się (typ/default/null/validation).");
+            }
+        }
+        catch (Exception ex)
+        {
+            _postCheckWarnings.Add($"Recheck domeny {desired.DomainName} nieudany: {ex.Message}");
+        }
+    }
+
+    private void MaybeRecheckTable(FbConnection connection, ParsedTableDefinition desired)
+    {
+        if (!_recheckEnabled || _dryRun)
+            return;
+
+        try
+        {
+            var after = ReadExistingColumns(connection, desired.TableName);
+            foreach (var column in desired.Columns)
+            {
+                if (!after.TryGetValue(column.ColumnName, out var existing))
+                {
+                    _postCheckWarnings.Add($"Po ALTER TABLE {desired.TableToken} brak kolumny {column.ColumnToken}.");
+                    continue;
+                }
+
+                if (!ColumnTypeEquals(column.Type, existing.Type) ||
+                    column.IsNullable != existing.IsNullable ||
+                    !DefaultEquals(column.DefaultExpression, existing.DefaultExpression))
+                {
+                    _postCheckWarnings.Add($"Po ALTER TABLE {desired.TableToken}.{column.ColumnToken} wartości nadal różnią się (typ/null/default).");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _postCheckWarnings.Add($"Recheck tabeli {desired.TableToken} nieudany: {ex.Message}");
+        }
     }
 
     private string NormalizeIdentifier(string identifier)
@@ -2103,7 +2351,8 @@ public class FirebirdUpdater
         string DefinitionSql,
         ColumnTypeDefinition Type,
         bool IsNullable,
-        string? DefaultExpression);
+        string? DefaultExpression,
+        bool HasExplicitNullability);
 
     private record ColumnTypeDefinition(
         string TypeSql,
@@ -2125,7 +2374,8 @@ public class FirebirdUpdater
         string DomainName,
         ColumnTypeDefinition Type,
         bool IsNullable,
-        string? DefaultExpression);
+        string? DefaultExpression,
+        string? ValidationExpression);
 
     private static FbTransaction BeginWaitTransaction(FbConnection connection)
     {
