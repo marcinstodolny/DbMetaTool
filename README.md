@@ -233,7 +233,7 @@ dotnet run update-db --connection-string "<connection_string>" --scripts-dir "./
 * Skrypty powinny być "1 plik = 1 obiekt".
 * Constraints/triggers/indexes są poza zakresem (nie są eksportowane ani synchronizowane) i mogą blokować część operacji ALTER/DROP — narzędzie raportuje błąd Firebirda.
 * Przed użyciem `FB_DESTRUCTIVE=1` zrób kopię pliku `.fdb`.
-* Uruchamiaj update, gdy baza jest w spoczynku (procedury/tabele nie są używane), bo DDL może się wywalić na „object is in use”.
+* Uruchamiaj update, gdy baza jest w spoczynku (procedury/tabele nie są używane), bo DDL może się wywalić na „object is in use".
 
 
 ## Examples
@@ -244,3 +244,9 @@ które można wykorzystać do szybkiego testu:
 ```bash
 dotnet run build-db --db-dir ".\data" --scripts-dir ".\src\Examples\Library"
 dotnet run update-db --connection-string "database=localhost/3050:C:\path\to\database.fdb;user=SYSDBA;password=<YOUR_PASSWORD>" --scripts-dir ".\src\Examples\Library_Update"
+```
+
+## Tests
+
+* Projekt zawiera testy jednostkowe (xUnit) dla normalizacji SQL i parsera tabel.
+* Uruchomienie: dotnet test.
