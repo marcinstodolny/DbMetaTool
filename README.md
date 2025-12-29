@@ -32,8 +32,10 @@ scripts/
 
 ````
 
+Pliki w każdym folderze są wykonywane **alfabetycznie**, więc warto stosować nazwy z prefiksami (np. `001_users.sql`, `002_books.sql`), jeśli kolejność ma znaczenie.
+
 Każdy plik powinien zawierać **jedno polecenie SQL** (np. `CREATE DOMAIN ...`, `CREATE TABLE ...`, `CREATE OR ALTER PROCEDURE ...`).
-To upraszcza wykonanie skryptów bez parsowania wielu statementów w jednym pliku.
+Przed wykonaniem narzędzie usuwa BOM, `SET TERM`, komentarze liniowe/blokowe oraz końcowy średnik, dlatego pojedyncze polecenie na plik upraszcza i ujednolica wykonanie.
 
 ## Komendy
 
@@ -70,9 +72,29 @@ Domyślnie baza tworzy plik:
 
 * `database.fdb` w `--db-dir`
 
+Procedury są wykonywane w **dwóch transakcjach**:
+1. Stub nagłówka (`CREATE OR ALTER PROCEDURE ... AS BEGIN END`) - aby umożliwić kompilację zależnych obiektów.
+2. Docelowe body - właściwa treść procedury.
+
+Jeśli w drugiej transakcji wystąpi błąd body, nowa baza zostanie utworzona z pustym stubem procedury. Popraw skrypt i ponów `build-db`, aby baza została odtworzona z pełnymi procedurami.
+
 #### Konfiguracja logowania dla build-db
 
 Build używa zmiennych środowiskowych:
+
+* `FB_USER` - użytkownik bazy
+* `FB_PASSWORD` - hasło użytkownika
+* `FB_HOST` - host serwera
+* `DB_FILE_NAME` - opcjonalna nazwa pliku bazy (domyślnie `database.fdb`)
+
+Bash:
+
+```bash
+export FB_USER="SYSDBA"
+export FB_PASSWORD="<YOUR_PASSWORD>"
+export FB_HOST="localhost"
+export DB_FILE_NAME="database.fdb" # opcjonalnie
+```
 
 PowerShell:
 
@@ -80,12 +102,7 @@ PowerShell:
 $env:FB_USER="SYSDBA"
 $env:FB_PASSWORD="<YOUR_PASSWORD>"
 $env:FB_HOST="localhost"
-```
-
-Opcjonalnie nazwa pliku bazy:
-
-```powershell
-$env:DB_FILE_NAME="database.fdb"
+$env:DB_FILE_NAME="database.fdb" # opcjonalnie
 ```
 
 ### 3) Update - aktualizacja istniejącej bazy na podstawie skryptów
@@ -98,21 +115,96 @@ dotnet run update-db \
   --scripts-dir ".\Examples\Library"
 ```
 
+Procedury są wykonywane w **dwóch fazach**:
+1. Stub nagłówka (`CREATE OR ALTER PROCEDURE ... AS BEGIN END`) - aby umożliwić kompilację zależnych obiektów.
+2. Docelowe body - właściwa treść procedury.
+
+Jeśli w drugiej fazie wystąpi błąd body, w bazie pozostanie stub (puste body). Popraw skrypt procedury i uruchom `update-db` ponownie; w razie potrzeby przywróć poprzednią wersję procedury ręcznie przed ponowną próbą.
+
+### Zmienne środowiskowe Update
+
+* `FB_DRY_RUN=1` - tylko plan (bez SQL), z listą blokad zależności i kandydatów do DROP.
+* `FB_DESTRUCTIVE=1` - pozwala na DROP brakujących obiektów/kolumn (z kontrolą zależności). Domyślnie DROP-y są tylko raportowane.
+* `FB_DEBUG_COMPARE=1` - wypisuje szczegóły różnic (typ/default/null/validation) dla domen i kolumn.
+* `FB_RECHECK=1` - po ALTER domen/kolumn ponownie czyta metadane i raportuje, jeśli różnice nie zniknęły.
+
+Przykłady:
+
+```bash
+FB_DRY_RUN=1 dotnet run update-db --connection-string "<...>" --scripts-dir "./scripts"
+FB_DESTRUCTIVE=1 dotnet run update-db --connection-string "<...>" --scripts-dir "./scripts"
+FB_DRY_RUN=1 FB_DESTRUCTIVE=1 dotnet run update-db --connection-string "<...>" --scripts-dir "./scripts"
+```
+
+PowerShell:
+
+```powershell
+$env:FB_DRY_RUN=1; dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
+$env:FB_DESTRUCTIVE=1; dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
+$env:FB_DRY_RUN=1; $env:FB_DESTRUCTIVE=1; dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
+$env:FB_DEBUG_COMPARE=1; $env:FB_RECHECK=1; dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
+```
+
+### Szybki start
+
+Podstawowe wywołania (kody wyjścia: `0` sukces, `1` brak/nieznane polecenie, `-1` błąd wykonania):
+
+```bash
+# Budowa nowej bazy na podstawie skryptów
+dotnet run build-db --db-dir "./data" --scripts-dir "./scripts"
+
+# Eksport metadanych z istniejącej bazy
+dotnet run export-scripts --connection-string "<connection_string>" --output-dir "./out"
+
+# Aktualizacja istniejącej bazy na podstawie skryptów
+dotnet run update-db --connection-string "<connection_string>" --scripts-dir "./scripts"
+```
+
 ## Jak działa update (zasady)
 
 * **Domains**
 
-  * jeśli domena istnieje i skrypt jest `CREATE DOMAIN`, to jest pomijany (MVP/bezpiecznie).
+  * `CREATE DOMAIN` istniejącej domeny → `ALTER DOMAIN` (TYPE/DEFAULT/NULL/VALIDATION) w jednej transakcji.
+  * DROP domeny tylko przy `FB_DESTRUCTIVE=1` i braku zależności.
 
 * **Tables**
 
-  * jeśli tabela nie istnieje: wykonuje `CREATE TABLE ...`
-  * jeśli tabela istnieje: dodaje brakujące kolumny (`ALTER TABLE ... ADD ...`)
-  * nie usuwa kolumn i nie zmienia typów istniejących kolumn (non-destructive update).
+  * brakująca tabela → `CREATE TABLE ...`
+  * istniejąca tabela → dodanie brakujących kolumn + `ALTER COLUMN` (typ/null/default)
+  * DROP brakujących kolumn jest wykonywany **po procedurach**, tylko gdy `FB_DESTRUCTIVE=1`, z kontrolą zależności; blokady trafiają do raportu/dry-run.
 
 * **Procedures**
 
-  * wykonywane idempotentnie: `CREATE OR ALTER PROCEDURE ...`
+  * dwie fazy: stub (nagłówek + puste body) → właściwe body (`CREATE OR ALTER PROCEDURE ...`)
+  * DROP z kontrolą zależności; w razie błędu body popraw skrypt i uruchom `update-db` ponownie (stub zostaje).
+
+* **DROP obiektów**
+
+  * brak pliku = kandydat do DROP (domeny/tabele/procedury) - realny DROP tylko gdy `FB_DESTRUCTIVE=1`.
+  * obsługiwane są też pliki `DROP ...` w tych samych folderach (hybryda: stan docelowy + migracje).
+  * DROP pomijany przy zależnościach (raport/dry-run); heurystyka rename jest informacyjna - RENAME wykonujesz ręcznie.
+
+## Scenariusze i oczekiwane zachowanie (skrót)
+
+* Zmiana typu/default/null/validation domeny → ALTER DOMAIN (raport "Zmodyfikowane domeny").
+* Dodanie kolumny → ALTER TABLE ADD.
+* Zmiana typu/default/null kolumny → ALTER COLUMN.
+* Usunięcie kolumny → kandydat do DROP; realny DROP tylko z `FB_DESTRUCTIVE=1` i brakiem zależności.
+* Zmiana ciała procedury → CREATE OR ALTER (stuby + pełne ciała).
+* Brak zmian → pliki pominięte, plan pusty w dry-run.
+* Dry-run → tylko plan SQL + blokady zależności + kandydaci do DROP (bez modyfikacji bazy).
+
+### Raporty i logi
+
+* `build-db` drukuje: ścieżkę do pliku bazy, liczbę wykonanych plików, liczbę błędów oraz szczegóły błędnych plików; w razie błędów kończy się wyjątkiem.
+* `update-db` drukuje: liczbę wykonanych plików, liczbę akcji SQL, pominięte pliki, błędy oraz ostrzeżenia parsowania. W zależności od trybu pojawiają się też:
+  * sekcje dodanych/zmodyfikowanych/usuniętych obiektów (domen, tabel, procedur, kolumn),
+  * kandydaci do DROP przy wyłączonej destrukcji,
+  * sugestie rename przy braku destrukcji,
+  * sekcja `DEBUG COMPARE` przy `FB_DEBUG_COMPARE=1`,
+  * ostrzeżenia po weryfikacji, jeśli wykryto niespójności po `FB_RECHECK=1`,
+  * w trybie dry-run – plan instrukcji oraz blokady zależności zamiast wykonania,
+  * w razie błędów lista plików wraz z komunikatami i zakończenie wyjątkiem.
 
 ## Przykładowy scenariusz użycia
 
@@ -130,18 +222,20 @@ dotnet run update-db \
    dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
    ```
 
-## Known limitations (MVP)
+## Known limitations (MVP + tryby)
 
-* Update nie usuwa obiektów/kolumn (brak operacji destrukcyjnych).
+* Operacje DROP wymagają `FB_DESTRUCTIVE=1` i braku zależności; inaczej trafiają do raportu/dry-run.
+* Heurystyka rename jest wyłącznie podpowiedzią; ewentualne zmiany nazw trzeba wykonać ręcznie.
+* Tryb docelowego stanu: brak pliku = kandydat do DROP (tylko z FB_DESTRUCTIVE=1). Dodatkowo obsługiwane są jawne pliki DROP.
 * Export/Update skupia się na domenach, tabelach (kolumnach) i procedurach.
-* Skrypty powinny być “1 plik = 1 obiekt”.
+* Skrypty powinny być "1 plik = 1 obiekt".
 
 
 ## Examples
 
-Repozytorium zawiera gotowy zestaw przykładowych skryptów w `Examples/Library` (domains/tables/procedures),
-który można wykorzystać do szybkiego testu:
+Repozytorium zawiera gotowy zestaw przykładowych skryptów w `Examples/Library` oraz `Examples/Library_Update` (domains/tables/procedures),
+które można wykorzystać do szybkiego testu:
 
 ```bash
 dotnet run build-db --db-dir ".\data" --scripts-dir ".\Examples\Library"
-dotnet run update-db --connection-string "database=localhost/3050:C:\path\to\database.fdb;user=SYSDBA;password=<YOUR_PASSWORD>" --scripts-dir ".\Examples\Library"
+dotnet run update-db --connection-string "database=localhost/3050:C:\path\to\database.fdb;user=SYSDBA;password=<YOUR_PASSWORD>" --scripts-dir ".\Examples\Library_Update"

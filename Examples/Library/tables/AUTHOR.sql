@@ -1,0 +1,6 @@
+CREATE TABLE "AUTHOR"
+(
+  "ID" "D_ID",
+  "FULL_NAME" "D_NAME",
+  "COUNTRY" VARCHAR(80)
+);

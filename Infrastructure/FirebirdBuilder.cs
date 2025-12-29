@@ -172,10 +172,9 @@ public static class FirebirdBuilder
 
         foreach (var filePath in files)
         {
-            var originalSql = File.ReadAllText(filePath);
+            var originalSql = Helpers.ReadNormalizedSql(filePath);
 
             var sqlToRun = sqlTransformer(originalSql);
-            sqlToRun = Helpers.TrimTrailingSqlSemicolon(sqlToRun);
 
             if (string.IsNullOrWhiteSpace(sqlToRun))
                 continue;

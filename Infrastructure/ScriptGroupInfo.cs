@@ -18,6 +18,4 @@ public static class ScriptGroupInfo
         };
 
     public static string GetFolderName(this ScriptGroup group) => FolderNames[group];
-
-    public static IReadOnlyList<ScriptGroup> ExecutionOrder { get; } = new[] { ScriptGroup.Domain, ScriptGroup.Table, ScriptGroup.Procedure };
 }
