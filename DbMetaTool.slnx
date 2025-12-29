@@ -1,3 +1,4 @@
 <Solution>
-  <Project Path="DbMetaTool.csproj" />
+  <Project Path="src/DbMetaTool.csproj" />
+  <Project Path="test/DbMetaTool.Tests.csproj" />
 </Solution>
