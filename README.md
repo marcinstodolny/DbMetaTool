@@ -32,8 +32,10 @@ scripts/
 
 ````
 
+Pliki w każdym folderze są wykonywane **alfabetycznie**, więc warto stosować nazwy z prefiksami (np. `001_users.sql`, `002_books.sql`), jeśli kolejność ma znaczenie.
+
 Każdy plik powinien zawierać **jedno polecenie SQL** (np. `CREATE DOMAIN ...`, `CREATE TABLE ...`, `CREATE OR ALTER PROCEDURE ...`).
-To upraszcza wykonanie skryptów bez parsowania wielu statementów w jednym pliku.
+Przed wykonaniem narzędzie usuwa BOM, `SET TERM`, komentarze liniowe/blokowe oraz końcowy średnik, dlatego pojedyncze polecenie na plik upraszcza i ujednolica wykonanie.
 
 ## Komendy
 
@@ -143,6 +145,21 @@ $env:FB_DRY_RUN=1; $env:FB_DESTRUCTIVE=1; dotnet run update-db --connection-stri
 $env:FB_DEBUG_COMPARE=1; $env:FB_RECHECK=1; dotnet run update-db --connection-string "<...>" --scripts-dir ".\scripts"
 ```
 
+### Szybki start
+
+Podstawowe wywołania (kody wyjścia: `0` sukces, `1` brak/nieznane polecenie, `-1` błąd wykonania):
+
+```bash
+# Budowa nowej bazy na podstawie skryptów
+dotnet run build-db --db-dir "./data" --scripts-dir "./scripts"
+
+# Eksport metadanych z istniejącej bazy
+dotnet run export-scripts --connection-string "<connection_string>" --output-dir "./out"
+
+# Aktualizacja istniejącej bazy na podstawie skryptów
+dotnet run update-db --connection-string "<connection_string>" --scripts-dir "./scripts"
+```
+
 ## Jak działa update (zasady)
 
 * **Domains**
@@ -177,6 +194,18 @@ $env:FB_DEBUG_COMPARE=1; $env:FB_RECHECK=1; dotnet run update-db --connection-st
 * Brak zmian → pliki pominięte, plan pusty w dry-run.
 * Dry-run → tylko plan SQL + blokady zależności + kandydaci do DROP (bez modyfikacji bazy).
 
+### Raporty i logi
+
+* `build-db` drukuje: ścieżkę do pliku bazy, liczbę wykonanych plików, liczbę błędów oraz szczegóły błędnych plików; w razie błędów kończy się wyjątkiem.
+* `update-db` drukuje: liczbę wykonanych plików, liczbę akcji SQL, pominięte pliki, błędy oraz ostrzeżenia parsowania. W zależności od trybu pojawiają się też:
+  * sekcje dodanych/zmodyfikowanych/usuniętych obiektów (domen, tabel, procedur, kolumn),
+  * kandydaci do DROP przy wyłączonej destrukcji,
+  * sugestie rename przy braku destrukcji,
+  * sekcja `DEBUG COMPARE` przy `FB_DEBUG_COMPARE=1`,
+  * ostrzeżenia po weryfikacji, jeśli wykryto niespójności po `FB_RECHECK=1`,
+  * w trybie dry-run – plan instrukcji oraz blokady zależności zamiast wykonania,
+  * w razie błędów lista plików wraz z komunikatami i zakończenie wyjątkiem.
+
 ## Przykładowy scenariusz użycia
 
 1. Utwórz w bazie przykładowe tabele i procedury (np. w IBExpert).
@@ -197,7 +226,7 @@ $env:FB_DEBUG_COMPARE=1; $env:FB_RECHECK=1; dotnet run update-db --connection-st
 
 * Operacje DROP wymagają `FB_DESTRUCTIVE=1` i braku zależności; inaczej trafiają do raportu/dry-run.
 * Heurystyka rename jest wyłącznie podpowiedzią; ewentualne zmiany nazw trzeba wykonać ręcznie.
-* Hybryda "skrypty = stan docelowy" + pliki `DROP ...` - używaj destrukcji świadomie.
+* Tryb docelowego stanu: brak pliku = kandydat do DROP (tylko z FB_DESTRUCTIVE=1). Dodatkowo obsługiwane są jawne pliki DROP.
 * Export/Update skupia się na domenach, tabelach (kolumnach) i procedurach.
 * Skrypty powinny być "1 plik = 1 obiekt".
 
