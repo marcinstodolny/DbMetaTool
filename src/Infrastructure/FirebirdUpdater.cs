@@ -752,29 +752,23 @@ public class FirebirdUpdater
 
         var pattern = objectKind switch
         {
-            "DOMAIN" => @"(?is)^\s*(CREATE|ALTER)\s+DOMAIN\s+(""[^""]+""|\w+)",
-            "TABLE" => @"(?is)^\s*CREATE\s+TABLE\s+(""[^""]+""|\w+)",
-            "PROCEDURE" => @"(?is)^\s*CREATE\s+(OR\s+ALTER\s+)?PROCEDURE\s+(""[^""]+""|\w+)",
+            "DOMAIN" => @"(?is)^\s*(?:CREATE|ALTER)\s+DOMAIN\s+(?<name>""[^""]+""|\w+)",
+            "TABLE" => @"(?is)^\s*CREATE\s+TABLE\s+(?<name>""[^""]+""|\w+)",
+            "PROCEDURE" => @"(?is)^\s*CREATE\s+(?:OR\s+ALTER\s+)?PROCEDURE\s+(?<name>""[^""]+""|\w+)",
             _ => throw new ArgumentOutOfRangeException(nameof(objectKind))
         };
 
         var match = System.Text.RegularExpressions.Regex.Match(sqlText, pattern);
-        if (!match.Success)
-            return null;
+        if (!match.Success) return null;
 
-        var nameGroup = match.Groups[2].Success ? match.Groups[2].Value : null;
+        var objectNameToken = match.Groups["name"].Value;
+        if (string.IsNullOrWhiteSpace(objectNameToken)) return null;
 
-        if (string.IsNullOrWhiteSpace(nameGroup))
-            return null;
-
-        var objectName = nameGroup.Trim();
+        var objectName = objectNameToken.Trim();
         if (objectName.StartsWith('\"') && objectName.EndsWith('\"') && objectName.Length >= 2)
             objectName = objectName.Substring(1, objectName.Length - 2).Replace("\"\"", "\"");
 
-        if (nameGroup.StartsWith('\"') && nameGroup.EndsWith('\"'))
-            return objectName;
-
-        return objectName.ToUpperInvariant();
+        return objectNameToken.StartsWith('\"') ? objectName : objectName.ToUpperInvariant();
     }
 
     private string? ReadProcedureSource(FbConnection connection, string procedureName)

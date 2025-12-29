@@ -9,7 +9,7 @@ namespace DbMetaTool
         // DbMetaTool export-scripts --connection-string "..." --output-dir "C:\out"
         // DbMetaTool update-db --connection-string "..." --scripts-dir "C:\scripts"
         public static int Main(string[] args)
-        {
+        { 
             if (args.Length == 0)
             {
                 Console.WriteLine("Użycie:");

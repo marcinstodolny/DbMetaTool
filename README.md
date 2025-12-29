@@ -67,7 +67,7 @@ Tworzy pustą bazę w `--db-dir` i wykonuje skrypty z `--scripts-dir`.
 ```bash
 dotnet run build-db \
   --db-dir ".\data" \
-  --scripts-dir ".\Examples\Library"
+  --scripts-dir ".\src\Examples\Library"
 ```
 
 Domyślnie baza tworzy plik:
@@ -114,7 +114,7 @@ Wykonuje skrypty w kolejności: `domains → tables → procedures`.
 ```bash
 dotnet run update-db \
   --connection-string "database=localhost/3050:C:\path\to\DATABASE.FDB;user=SYSDBA;password=<YOUR_PASSWORD>" \
-  --scripts-dir ".\Examples\Library"
+  --scripts-dir ".\src\Examples\Library"
 ```
 
 Procedury są wykonywane w **dwóch fazach**:
@@ -238,9 +238,9 @@ dotnet run update-db --connection-string "<connection_string>" --scripts-dir "./
 
 ## Examples
 
-Repozytorium zawiera gotowy zestaw przykładowych skryptów w `Examples/Library` oraz `Examples/Library_Update` (domains/tables/procedures),
+Repozytorium zawiera gotowy zestaw przykładowych skryptów w `src/Examples/Library` oraz `src/Examples/Library_Update` (domains/tables/procedures),
 które można wykorzystać do szybkiego testu:
 
 ```bash
-dotnet run build-db --db-dir ".\data" --scripts-dir ".\Examples\Library"
-dotnet run update-db --connection-string "database=localhost/3050:C:\path\to\database.fdb;user=SYSDBA;password=<YOUR_PASSWORD>" --scripts-dir ".\Examples\Library_Update"
+dotnet run build-db --db-dir ".\data" --scripts-dir ".\src\Examples\Library"
+dotnet run update-db --connection-string "database=localhost/3050:C:\path\to\database.fdb;user=SYSDBA;password=<YOUR_PASSWORD>" --scripts-dir ".\src\Examples\Library_Update"
