@@ -1,4 +1,5 @@
-﻿using FirebirdSql.Data.FirebirdClient;
+﻿using System.Text.RegularExpressions;
+using FirebirdSql.Data.FirebirdClient;
 
 namespace DbMetaTool.Infrastructure;
 
@@ -12,6 +13,27 @@ public static class Helpers
         return Directory.GetFiles(directoryPath, "*.sql", SearchOption.TopDirectoryOnly)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    public static string ReadNormalizedSql(string filePath)
+    {
+        var sqlText = File.ReadAllText(filePath);
+        return NormalizeSqlText(sqlText);
+    }
+
+    public static string NormalizeSqlText(string sqlText)
+    {
+        ArgumentNullException.ThrowIfNull(sqlText);
+
+        var withoutBom = sqlText.TrimStart('\uFEFF');
+        var withoutSetTerm = Regex.Replace(withoutBom, @"(?im)^\s*SET\s+TERM\b.*(?:\r?\n)?", string.Empty);
+        var withoutBlockComments = Regex.Replace(withoutSetTerm, @"(?s)/\*.*?\*/", string.Empty);
+        var withoutLineComments = Regex.Replace(withoutBlockComments, @"--.*?(?:\r?\n|$)", string.Empty);
+        var normalizedNewLines = withoutLineComments.Replace("\r\n", "\n");
+        var trimmedStart = normalizedNewLines.TrimStart();
+
+        var withoutTrailingSemicolon = TrimTrailingSqlSemicolon(trimmedStart);
+        return withoutTrailingSemicolon.Trim();
     }
 
     public static string TrimTrailingSqlSemicolon(string sqlText)

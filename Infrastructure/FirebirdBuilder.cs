@@ -172,10 +172,9 @@ public static class FirebirdBuilder
 
         foreach (var filePath in files)
         {
-            var originalSql = File.ReadAllText(filePath);
+            var originalSql = Helpers.ReadNormalizedSql(filePath);
 
             var sqlToRun = sqlTransformer(originalSql);
-            sqlToRun = Helpers.TrimTrailingSqlSemicolon(sqlToRun);
 
             if (string.IsNullOrWhiteSpace(sqlToRun))
                 continue;
@@ -227,10 +226,8 @@ public static class FirebirdBuilder
 
     private static string EnsureCreateOrAlterForProcedure(string sqlText)
     {
-        var clean = StripLeadingEmptyAndCommentLines(sqlText);
-
         return Regex.Replace(
-            clean,
+            sqlText,
             @"(?is)^\s*CREATE\s+(?:PROC|PROCEDURE)\b",
             "CREATE OR ALTER PROCEDURE");
     }
@@ -243,9 +240,7 @@ public static class FirebirdBuilder
 
     private static string? TryBuildProcedureStubSql(string sqlText)
     {
-        var clean = StripLeadingEmptyAndCommentLines(sqlText);
-
-        var match = Regex.Match(clean, @"(?is)^\s*CREATE\s+(OR\s+ALTER\s+)?(PROC|PROCEDURE)\s+.+?\bAS\b");
+        var match = Regex.Match(sqlText, @"(?is)^\s*CREATE\s+(OR\s+ALTER\s+)?(PROC|PROCEDURE)\s+.+?\bAS\b");
         if (!match.Success)
             return null;
 
@@ -254,29 +249,5 @@ public static class FirebirdBuilder
 
         stub = EnsureCreateOrAlterForProcedure(stub);
         return stub;
-    }
-
-    private static string StripLeadingEmptyAndCommentLines(string sqlText)
-    {
-        if (string.IsNullOrEmpty(sqlText))
-            return sqlText;
-
-        var withoutBom = sqlText.TrimStart('\uFEFF');
-        var lines = withoutBom.Replace("\r\n", "\n").Split('\n');
-        var index = 0;
-
-        while (index < lines.Length)
-        {
-            var line = lines[index].Trim();
-            if (line.Length == 0 || line.StartsWith("--"))
-            {
-                index++;
-                continue;
-            }
-
-            break;
-        }
-
-        return string.Join("\n", lines.Skip(index));
     }
 }

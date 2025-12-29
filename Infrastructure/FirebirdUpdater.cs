@@ -387,10 +387,9 @@ public class FirebirdUpdater
 
         foreach (var filePath in files)
         {
-            var originalSql = File.ReadAllText(filePath);
+            var originalSql = Helpers.ReadNormalizedSql(filePath);
 
             var sqlToRun = originalSql;
-            var normalizedSql = StripLeadingEmptyAndCommentLines(originalSql);
             string? tableNameFromHeader = null;
             string? procedureName = null;
             var isDropProcedure = false;
@@ -404,11 +403,11 @@ public class FirebirdUpdater
                 if (domainName != null)
                 {
                     var isCreateDomain = System.Text.RegularExpressions.Regex.IsMatch(
-                        StripLeadingEmptyAndCommentLines(originalSql),
+                        originalSql,
                         @"(?is)^\s*CREATE\s+DOMAIN\b"
                     );
 
-                    var isDropDomain = IsDropStatement(normalizedSql, "DOMAIN");
+                    var isDropDomain = IsDropStatement(originalSql, "DOMAIN");
                     var existedDomainBefore = DomainExists(connection, domainName);
 
                     if (!isDropDomain)
@@ -500,7 +499,7 @@ public class FirebirdUpdater
             }
             else if (scriptGroup == ScriptGroup.Table)
             {
-                var isDropTable = IsDropStatement(normalizedSql, "TABLE");
+                var isDropTable = IsDropStatement(originalSql, "TABLE");
                 tableNameFromHeader = TryExtractObjectName(originalSql, "TABLE") ?? TryExtractDropObjectName(originalSql, "TABLE");
                 if (tableNameFromHeader != null)
                     existedTableBefore = TableExists(connection, tableNameFromHeader);
@@ -544,7 +543,7 @@ public class FirebirdUpdater
                 {
                     try
                     {
-                        var parsed = ParseCreateTableColumns(originalSql, _targetDomainDefinitions);
+                        var parsed = ParseCreateTableColumns(originalSql, _targetDomainDefinitions, filePath);
                         tableNameFromHeader = parsed.TableName;
                         existedTableBefore = TableExists(connection, tableNameFromHeader);
                     }
@@ -557,7 +556,7 @@ public class FirebirdUpdater
 
                 if (tableNameFromHeader != null && existedTableBefore)
                 {
-                    var parsed = ParseCreateTableColumns(originalSql, _targetDomainDefinitions);
+                    var parsed = ParseCreateTableColumns(originalSql, _targetDomainDefinitions, filePath);
                     var existingColumns = ReadExistingColumns(connection, parsed.TableName);
 
                     var alterStatements = new List<string>();
@@ -626,7 +625,7 @@ public class FirebirdUpdater
             }
             else if (scriptGroup == ScriptGroup.Procedure)
             {
-                isDropProcedure = IsDropStatement(normalizedSql, "PROCEDURE");
+                isDropProcedure = IsDropStatement(originalSql, "PROCEDURE");
                 procedureName = TryExtractObjectName(originalSql, "PROCEDURE") ?? TryExtractDropObjectName(originalSql, "PROCEDURE");
                 if (procedureName != null)
                     existedProcedureBefore = ProcedureExists(connection, procedureName);
@@ -709,34 +708,12 @@ public class FirebirdUpdater
         }
     }
 
-    private string StripLeadingEmptyAndCommentLines(string sqlText)
-    {
-        var withoutBom = sqlText.TrimStart('\uFEFF');
-        var lines = withoutBom.Replace("\r\n", "\n").Split('\n');
-        var index = 0;
-
-        while (index < lines.Length)
-        {
-            var line = lines[index].Trim();
-
-            if (line.Length == 0 || line.StartsWith("--"))
-            {
-                index++;
-                continue;
-            }
-
-            break;
-        }
-
-        return string.Join("\n", lines.Skip(index));
-    }
-
     private string NormalizeProcedureForComparison(string sqlText)
     {
-        var withoutComments = RemoveSqlComments(sqlText);
-        var builder = new StringBuilder(withoutComments.Length);
+        var normalized = Helpers.NormalizeSqlText(sqlText);
+        var builder = new StringBuilder(normalized.Length);
 
-        foreach (var ch in withoutComments)
+        foreach (var ch in normalized)
         {
             if (!char.IsWhiteSpace(ch))
                 builder.Append(char.ToUpperInvariant(ch));
@@ -745,15 +722,8 @@ public class FirebirdUpdater
         return builder.ToString();
     }
 
-    private string RemoveSqlComments(string sqlText)
-    {
-        var withoutBlock = Regex.Replace(sqlText, @"(?s)/\*.*?\*/", string.Empty);
-        return Regex.Replace(withoutBlock, @"--.*?(?:\r?\n|$)", " ", RegexOptions.Multiline);
-    }
-
     private string? TryExtractObjectName(string sqlText, string objectKind)
     {
-        var clean = StripLeadingEmptyAndCommentLines(sqlText);
 
         var pattern = objectKind switch
         {
@@ -763,7 +733,7 @@ public class FirebirdUpdater
             _ => throw new ArgumentOutOfRangeException(nameof(objectKind))
         };
 
-        var match = System.Text.RegularExpressions.Regex.Match(clean, pattern);
+        var match = System.Text.RegularExpressions.Regex.Match(sqlText, pattern);
         if (!match.Success)
             return null;
 
@@ -779,7 +749,7 @@ public class FirebirdUpdater
         if (nameGroup.StartsWith('\"') && nameGroup.EndsWith('\"'))
             return objectName;
 
-        return objectName.ToUpperInvariant(); 
+        return objectName.ToUpperInvariant();
     }
 
     private string? ReadProcedureSource(FbConnection connection, string procedureName)
@@ -840,8 +810,6 @@ public class FirebirdUpdater
 
     private string? TryExtractDropObjectName(string sqlText, string objectKind)
     {
-        var clean = StripLeadingEmptyAndCommentLines(sqlText);
-
         var pattern = objectKind switch
         {
             "TABLE" => @"(?is)^\s*DROP\s+TABLE\s+(""[^""]+""|\w+)",
@@ -850,7 +818,7 @@ public class FirebirdUpdater
             _ => throw new ArgumentOutOfRangeException(nameof(objectKind))
         };
 
-        var match = Regex.Match(clean, pattern);
+        var match = Regex.Match(sqlText, pattern);
         if (!match.Success) return null;
 
         var nameGroup = match.Groups[1].Value.Trim();
@@ -888,9 +856,8 @@ public class FirebirdUpdater
 
     private string EnsureCreateOrAlterForProcedure(string sqlText)
     {
-        var clean = StripLeadingEmptyAndCommentLines(sqlText);
         var rgx = new System.Text.RegularExpressions.Regex(@"(?is)^\s*CREATE\s+PROCEDURE\b");
-        return rgx.Replace(clean, "CREATE OR ALTER PROCEDURE", 1);
+        return rgx.Replace(sqlText, "CREATE OR ALTER PROCEDURE", 1);
     }
     private DomainDefinition ParseDomainDefinition(string sqlText, string domainName)
     {
@@ -983,8 +950,7 @@ public class FirebirdUpdater
 
     private string? TryBuildProcedureStubSql(string sqlText)
     {
-        var clean = StripLeadingEmptyAndCommentLines(sqlText);
-        var match = Regex.Match(clean, @"(?is)^\s*CREATE\s+(OR\s+ALTER\s+)?(PROC|PROCEDURE)\s+.+?\bAS\b");
+        var match = Regex.Match(sqlText, @"(?is)^\s*CREATE\s+(OR\s+ALTER\s+)?(PROC|PROCEDURE)\s+.+?\bAS\b");
         if (!match.Success)
             return null;
 
@@ -1085,9 +1051,12 @@ public class FirebirdUpdater
         }
     }
 
-    private ParsedTableDefinition ParseCreateTableColumns(string sqlText, IReadOnlyDictionary<string, DomainDefinition> domainDefinitions)
+    private ParsedTableDefinition ParseCreateTableColumns(
+        string sqlText,
+        IReadOnlyDictionary<string, DomainDefinition> domainDefinitions,
+        string? sourceFile = null)
     {
-        var clean = StripLeadingEmptyAndCommentLines(sqlText);
+        var clean = Helpers.NormalizeSqlText(sqlText);
 
         var match = System.Text.RegularExpressions.Regex.Match(
             clean,
@@ -1175,25 +1144,34 @@ public class FirebirdUpdater
         {
             var item = rawItem.Trim();
 
-            if (item.StartsWith("CONSTRAINT", StringComparison.OrdinalIgnoreCase) ||
-                item.StartsWith("PRIMARY", StringComparison.OrdinalIgnoreCase) ||
-                item.StartsWith("UNIQUE", StringComparison.OrdinalIgnoreCase) ||
-                item.StartsWith("FOREIGN", StringComparison.OrdinalIgnoreCase) ||
-                item.StartsWith("CHECK", StringComparison.OrdinalIgnoreCase))
+            if (ShouldIgnoreCreateTableItem(item))
             {
                 continue;
             }
 
             var colMatch = System.Text.RegularExpressions.Regex.Match(item, @"(?is)^\s*(""[^""]+""|\w+)\s+(.*)$");
             if (!colMatch.Success)
+            {
+                LogParseWarning(sourceFile, tableToken, item);
                 continue;
+            }
+
+            var typePart = colMatch.Groups[2].Value.Trim();
+            if (!LooksLikeColumnDefinition(typePart))
+            {
+                LogParseWarning(sourceFile, tableToken, item);
+                continue;
+            }
 
             var columnToken = colMatch.Groups[1].Value.Trim();
             var columnName = NormalizeIdentifierForComparison(columnToken);
-            var definitionSql = colMatch.Groups[2].Value.Trim();
+            var definitionSql = typePart;
 
             if (definitionSql.Length == 0)
+            {
+                LogParseWarning(sourceFile, tableToken, item);
                 continue;
+            }
 
             columns.Add(ParseColumnDefinition(columnToken, columnName, definitionSql));
         }
@@ -1217,6 +1195,54 @@ public class FirebirdUpdater
         }
 
         return new ParsedTableDefinition(tableToken, tableName, adjustedColumns);
+    }
+
+    private bool ShouldIgnoreCreateTableItem(string item)
+    {
+        var upper = item.TrimStart().ToUpperInvariant();
+        var ignoredPrefixes = new[]
+        {
+            "CONSTRAINT",
+            "PRIMARY",
+            "UNIQUE",
+            "FOREIGN",
+            "CHECK",
+            "COMPUTED BY",
+            "GENERATED",
+            "IDENTITY",
+            "COLLATE"
+        };
+
+        return ignoredPrefixes.Any(prefix => upper.StartsWith(prefix, StringComparison.Ordinal));
+    }
+
+    private bool LooksLikeColumnDefinition(string definitionSql)
+    {
+        var match = Regex.Match(definitionSql, @"^(?<firstToken>""[^""]+""|\w+)");
+        if (!match.Success)
+            return false;
+
+        var firstToken = match.Groups["firstToken"].Value.ToUpperInvariant();
+        var blockedStarts = new[]
+        {
+            "CONSTRAINT",
+            "PRIMARY",
+            "UNIQUE",
+            "FOREIGN",
+            "CHECK",
+            "COMPUTED",
+            "GENERATED",
+            "IDENTITY",
+            "COLLATE"
+        };
+
+        return blockedStarts.All(blocked => !firstToken.StartsWith(blocked, StringComparison.Ordinal));
+    }
+
+    private void LogParseWarning(string? sourceFile, string tableToken, string fragment)
+    {
+        var location = string.IsNullOrWhiteSpace(sourceFile) ? "<brak pliku>" : sourceFile;
+        _failures.Add((location, $"Pominięto fragment definicji tabeli {tableToken}: {fragment}"));
     }
 
     private string NormalizeIdentifierForComparison(string identifierToken)
@@ -1470,7 +1496,7 @@ public class FirebirdUpdater
 
             try
             {
-                var parsed = ParseCreateTableColumns(content, _targetDomainDefinitions);
+                var parsed = ParseCreateTableColumns(content, _targetDomainDefinitions, file);
                 set.Add(parsed.TableName);
             }
             catch (Exception ex)
@@ -1495,7 +1521,7 @@ public class FirebirdUpdater
 
             try
             {
-                var parsed = ParseCreateTableColumns(content, domainDefinitions);
+                var parsed = ParseCreateTableColumns(content, domainDefinitions, file);
                 map[parsed.TableName] = parsed;
             }
             catch (Exception ex)
