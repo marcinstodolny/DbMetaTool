@@ -30,7 +30,7 @@ scripts/
   procedures/
     *.sql
 
-````
+```
 
 Pliki w każdym folderze są wykonywane **alfabetycznie**, więc warto stosować nazwy z prefiksami (np. `001_users.sql`, `002_books.sql`), jeśli kolejność ma znaczenie.
 
@@ -47,7 +47,7 @@ Generuje pliki `.sql` w strukturze `domains/tables/procedures`.
 dotnet run export-scripts \
   --connection-string "database=localhost/3050:C:\path\to\TEST.FDB;user=SYSDBA;password=<YOUR_PASSWORD>" \
   --output-dir ".\out"
-````
+```
 
 Efekt:
 
@@ -57,6 +57,8 @@ out/
   tables/
   procedures/
 ```
+
+Każdy obiekt jest eksportowany do osobnego pliku (1 plik = 1 obiekt).
 
 ### 2) Build - utworzenie nowej bazy na podstawie skryptów
 
@@ -182,7 +184,7 @@ dotnet run update-db --connection-string "<connection_string>" --scripts-dir "./
 
   * brak pliku = kandydat do DROP (domeny/tabele/procedury) - realny DROP tylko gdy `FB_DESTRUCTIVE=1`.
   * obsługiwane są też pliki `DROP ...` w tych samych folderach (hybryda: stan docelowy + migracje).
-  * DROP pomijany przy zależnościach (raport/dry-run); heurystyka rename jest informacyjna - RENAME wykonujesz ręcznie.
+  * DROP pomijany przy zależnościach (raport/dry-run); heurystyka rename jest informacyjna - RENAME wykonujesz ręcznie. Rename kolumn/tabel nie migruje danych automatycznie (traktowane jako add+drop w trybie destrukcyjnym).
 
 ## Scenariusze i oczekiwane zachowanie (skrót)
 
@@ -229,6 +231,9 @@ dotnet run update-db --connection-string "<connection_string>" --scripts-dir "./
 * Tryb docelowego stanu: brak pliku = kandydat do DROP (tylko z FB_DESTRUCTIVE=1). Dodatkowo obsługiwane są jawne pliki DROP.
 * Export/Update skupia się na domenach, tabelach (kolumnach) i procedurach.
 * Skrypty powinny być "1 plik = 1 obiekt".
+* Constraints/triggers/indexes są poza zakresem (nie są eksportowane ani synchronizowane) i mogą blokować część operacji ALTER/DROP — narzędzie raportuje błąd Firebirda.
+* Przed użyciem `FB_DESTRUCTIVE=1` zrób kopię pliku `.fdb`.
+* Uruchamiaj update, gdy baza jest w spoczynku (procedury/tabele nie są używane), bo DDL może się wywalić na „object is in use”.
 
 
 ## Examples
