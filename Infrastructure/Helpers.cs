@@ -1,4 +1,5 @@
-﻿using System.Text.RegularExpressions;
+﻿using System.Text;
+using System.Text.RegularExpressions;
 using FirebirdSql.Data.FirebirdClient;
 
 namespace DbMetaTool.Infrastructure;
@@ -28,12 +29,99 @@ public static class Helpers
         var withoutBom = sqlText.TrimStart('\uFEFF');
         var withoutSetTerm = Regex.Replace(withoutBom, @"(?im)^\s*SET\s+TERM\b.*(?:\r?\n)?", string.Empty);
         var withoutBlockComments = Regex.Replace(withoutSetTerm, @"(?s)/\*.*?\*/", string.Empty);
-        var withoutLineComments = Regex.Replace(withoutBlockComments, @"--.*?(?:\r?\n|$)", string.Empty);
+        var withoutLineComments = RemoveLineCommentsOutsideStrings(withoutBlockComments);
         var normalizedNewLines = withoutLineComments.Replace("\r\n", "\n");
         var trimmedStart = normalizedNewLines.TrimStart();
 
         var withoutTrailingSemicolon = TrimTrailingSqlSemicolon(trimmedStart);
         return withoutTrailingSemicolon.Trim();
+    }
+
+    private static string RemoveLineCommentsOutsideStrings(string text)
+    {
+        var result = new StringBuilder(text.Length);
+        var inSingleQuote = false;
+        var inDoubleQuote = false;
+
+        for (var index = 0; index < text.Length; index++)
+        {
+            var current = text[index];
+
+            if (!inDoubleQuote && current == '\'')
+            {
+                result.Append(current);
+
+                if (inSingleQuote)
+                {
+                    if (index + 1 < text.Length && text[index + 1] == '\'')
+                    {
+                        result.Append('\'');
+                        index++;
+                    }
+                    else
+                    {
+                        inSingleQuote = false;
+                    }
+                }
+                else
+                {
+                    inSingleQuote = true;
+                }
+
+                continue;
+            }
+
+            if (!inSingleQuote && current == '"')
+            {
+                result.Append(current);
+
+                if (inDoubleQuote)
+                {
+                    if (index + 1 < text.Length && text[index + 1] == '"')
+                    {
+                        result.Append('"');
+                        index++;
+                    }
+                    else
+                    {
+                        inDoubleQuote = false;
+                    }
+                }
+                else
+                {
+                    inDoubleQuote = true;
+                }
+
+                continue;
+            }
+
+            if (!inSingleQuote && !inDoubleQuote && current == '-' && index + 1 < text.Length && text[index + 1] == '-')
+            {
+                var next = index + 2;
+                while (next < text.Length && text[next] != '\n' && text[next] != '\r')
+                {
+                    next++;
+                }
+
+                if (next < text.Length)
+                {
+                    result.Append(text[next]);
+
+                    if (text[next] == '\r' && next + 1 < text.Length && text[next + 1] == '\n')
+                    {
+                        result.Append(text[next + 1]);
+                        next++;
+                    }
+                }
+
+                index = next;
+                continue;
+            }
+
+            result.Append(current);
+        }
+
+        return result.ToString();
     }
 
     public static string TrimTrailingSqlSemicolon(string sqlText)

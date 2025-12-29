@@ -1444,7 +1444,7 @@ public class FirebirdUpdater
         var set = new HashSet<string>(StringComparer.Ordinal);
         foreach (var file in files)
         {
-            var content = File.ReadAllText(file);
+            var content = Helpers.ReadNormalizedSql(file);
             var name = TryExtractObjectName(content, objectKind) ?? TryExtractDropObjectName(content, objectKind);
             if (name != null) set.Add(name);
         }
@@ -1458,7 +1458,7 @@ public class FirebirdUpdater
 
         foreach (var file in files)
         {
-            var content = File.ReadAllText(file);
+            var content = Helpers.ReadNormalizedSql(file);
             if (IsDropStatement(content, "DOMAIN"))
                 continue;
 
@@ -1486,7 +1486,7 @@ public class FirebirdUpdater
         var set = new HashSet<string>(StringComparer.Ordinal);
         foreach (var file in files)
         {
-            var content = File.ReadAllText(file);
+            var content = Helpers.ReadNormalizedSql(file);
             if (IsDropStatement(content, "TABLE"))
             {
                 var dropName = TryExtractDropObjectName(content, "TABLE");
@@ -1515,7 +1515,7 @@ public class FirebirdUpdater
 
         foreach (var file in files)
         {
-            var content = File.ReadAllText(file);
+            var content = Helpers.ReadNormalizedSql(file);
             if (IsDropStatement(content, "TABLE"))
                 continue;
 
@@ -1540,7 +1540,7 @@ public class FirebirdUpdater
 
         foreach (var file in files)
         {
-            var content = File.ReadAllText(file);
+            var content = Helpers.ReadNormalizedSql(file);
             if (IsDropStatement(content, "PROCEDURE"))
                 continue;
 
