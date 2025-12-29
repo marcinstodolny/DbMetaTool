@@ -25,6 +25,7 @@ public class FirebirdUpdater
     private readonly List<string> _addedDomains = new();
     private readonly List<string> _alteredDomains = new();
     private readonly List<string> _droppedDomains = new();
+    private readonly List<(string File, string Warning)> _parseWarnings = new();
     private readonly List<(string Statement, string TableToken, string TableName, string ColumnToken, string ColumnName)> _deferredColumnDrops = new();
     private readonly HashSet<string> _deferredColumnDropKeys = new(StringComparer.Ordinal);
     private readonly List<string> _columnDropCandidates = new();
@@ -100,6 +101,7 @@ public class FirebirdUpdater
         Console.WriteLine($"Wykonane akcje SQL: {_executedStatements}");
         Console.WriteLine($"Pominięte pliki: {_skippedFiles}");
         Console.WriteLine($"Błędy: {_failures.Count}");
+        Console.WriteLine($"Ostrzeżenia parsowania: {_parseWarnings.Count}");
         if (_dryRun)
         {
             Console.WriteLine();
@@ -173,6 +175,18 @@ public class FirebirdUpdater
                 }
 
                 throw new Exception("Update-db przerwany: wystąpiły błędy w skryptach.");
+            }
+
+            if (_parseWarnings.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Szczegóły ostrzeżeń parsowania:");
+                foreach (var warn in _parseWarnings)
+                {
+                    Console.WriteLine($"Plik: {warn.File}");
+                    Console.WriteLine($"Szczegóły: {warn.Warning}");
+                    Console.WriteLine();
+                }
             }
 
             return;
@@ -291,6 +305,17 @@ public class FirebirdUpdater
             Console.WriteLine();
             Console.WriteLine("Ostrzeżenia po weryfikacji:");
             foreach (var warn in _postCheckWarnings) Console.WriteLine($"- {warn}");
+        }
+        if (_parseWarnings.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Ostrzeżenia parsowania:");
+            foreach (var warn in _parseWarnings)
+            {
+                Console.WriteLine($"Plik: {warn.File}");
+                Console.WriteLine($"Szczegóły: {warn.Warning}");
+                Console.WriteLine();
+            }
         }
         if (_failures.Count <= 0) return;
         Console.WriteLine();
@@ -1242,7 +1267,7 @@ public class FirebirdUpdater
     private void LogParseWarning(string? sourceFile, string tableToken, string fragment)
     {
         var location = string.IsNullOrWhiteSpace(sourceFile) ? "<brak pliku>" : sourceFile;
-        _failures.Add((location, $"Pominięto fragment definicji tabeli {tableToken}: {fragment}"));
+        _parseWarnings.Add((location, $"Pominięto fragment definicji tabeli {tableToken}: {fragment}"));
     }
 
     private string NormalizeIdentifierForComparison(string identifierToken)
