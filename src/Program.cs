@@ -85,7 +85,8 @@ namespace DbMetaTool
             var connectionString = Helpers.BuildConnectionString(databaseFilePath);
 
             FirebirdBuilder.CreateDatabase(connectionString, databaseDirectory, databaseFilePath);
-            var applyResult = FirebirdBuilder.ApplyScripts(connectionString, scriptsDirectory);
+            var atomicEnabled = string.Equals(Environment.GetEnvironmentVariable("FB_ATOMIC"), "1", StringComparison.Ordinal);
+            var applyResult = FirebirdBuilder.ApplyScripts(connectionString, scriptsDirectory, atomicEnabled);
 
             FirebirdBuilder.Report(databaseFilePath, applyResult.executedOk, applyResult.failures);
         }
