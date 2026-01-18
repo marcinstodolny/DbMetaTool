@@ -27,7 +27,7 @@ public static class FirebirdBuilder
         }
     }
 
-    public static (int executedOk, List<(string File, string Error)> failures) ApplyScripts(string connectionString, string scriptsDirectory)
+    public static (int executedOk, List<(string File, string Error)> failures) ApplyScripts(string connectionString, string scriptsDirectory, bool atomicEnabled)
     {
         var failures = new List<(string File, string Error)>();
         var executedOk = 0;
@@ -38,16 +38,36 @@ public static class FirebirdBuilder
         var tableFiles = Helpers.GetSqlFiles(Path.Combine(scriptsDirectory, ScriptGroup.Table.GetFolderName()));
         var procedureFiles = Helpers.GetSqlFiles(Path.Combine(scriptsDirectory, ScriptGroup.Procedure.GetFolderName()));
 
-        if (!RunPhase1(connection, domainFiles, tableFiles, procedureFiles, ref executedOk, failures))
+        if (atomicEnabled)
         {
+            RunSinglePhase(connection, domainFiles, tableFiles, procedureFiles, ref executedOk, failures);
             return (executedOk, failures);
         }
-        
-        RunPhase2(connection, procedureFiles, ref executedOk, failures);
+
+        RunTwoPhase(connection, domainFiles, tableFiles, procedureFiles, ref executedOk, failures);
+       
         return (executedOk, failures);
     }
 
-    private static bool RunPhase1(FbConnection connection, IReadOnlyList<string> domainFiles,
+    private static bool RunSinglePhase(FbConnection connection, IReadOnlyList<string> domainFiles,
+        IReadOnlyList<string> tableFiles, IReadOnlyList<string> procedureFiles, ref int executedOk,
+        List<(string File, string Error)> failures)
+    {
+        using var transaction = BeginWaitTransaction(connection);
+
+        if (!ExecuteFilesInTransaction(connection, transaction, ScriptGroup.Domain.GetFolderName(), domainFiles, sql => sql, countAsExecutedFile: true, ref executedOk, failures)
+            || !ExecuteFilesInTransaction(connection, transaction, ScriptGroup.Table.GetFolderName(), tableFiles, sql => sql, countAsExecutedFile: true, ref executedOk, failures)
+            || !ExecuteFilesInTransaction(connection, transaction, $"{ScriptGroup.Procedure.GetFolderName()} (stubs)", procedureFiles, BuildProcedureStubOrThrow, countAsExecutedFile: false, ref executedOk, failures)
+            || !ExecuteFilesInTransaction(connection, transaction, ScriptGroup.Procedure.GetFolderName(), procedureFiles, EnsureCreateOrAlterForProcedure, countAsExecutedFile: true, ref executedOk, failures))
+        {
+            return Rollback(transaction);
+        }
+
+        transaction.Commit();
+        return true;
+    }
+
+    private static void RunTwoPhase(FbConnection connection, IReadOnlyList<string> domainFiles,
         IReadOnlyList<string> tableFiles, IReadOnlyList<string> procedureFiles, ref int executedOk,
         List<(string File, string Error)> failures)
     {
@@ -57,24 +77,21 @@ public static class FirebirdBuilder
             || !ExecuteFilesInTransaction(connection, transaction, ScriptGroup.Table.GetFolderName(), tableFiles, sql => sql, countAsExecutedFile: true, ref executedOk, failures)
             || !ExecuteFilesInTransaction(connection, transaction, $"{ScriptGroup.Procedure.GetFolderName()} (stubs)", procedureFiles, BuildProcedureStubOrThrow, countAsExecutedFile: false, ref executedOk, failures))
         {
-            return Rollback(transaction);
+            Rollback(transaction);
+            return;
         }
 
         transaction.Commit();
-        return true;
-    }
 
-    private static bool RunPhase2(FbConnection connection, IReadOnlyList<string> procedureFiles, ref int executedOk, List<(string File, string Error)> failures)
-    {
-        using var transaction = BeginWaitTransaction(connection);
+        using var secondTransaction = BeginWaitTransaction(connection);
 
-        if (!ExecuteFilesInTransaction(connection, transaction, ScriptGroup.Procedure.GetFolderName(), procedureFiles, EnsureCreateOrAlterForProcedure, countAsExecutedFile: true, ref executedOk, failures))
+        if (!ExecuteFilesInTransaction(connection, secondTransaction, ScriptGroup.Procedure.GetFolderName(), procedureFiles, EnsureCreateOrAlterForProcedure, countAsExecutedFile: true, ref executedOk, failures))
         {
-            return Rollback(transaction);
+            Rollback(secondTransaction);
+            return;
         }
 
-        transaction.Commit();
-        return true;
+        secondTransaction.Commit();
     }
 
     public static void Report(string databaseFilePath, int executedOk, List<(string File, string Error)> failures)

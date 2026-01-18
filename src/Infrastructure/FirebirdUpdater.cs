@@ -40,7 +40,7 @@ public class FirebirdUpdater
     private bool _debugCompareEnabled;
     private bool _recheckEnabled;
 
-    public void UpdateTwoPhases(string scriptsDirectory, FbConnection connection, bool destructiveEnabled, bool dryRun, bool debugCompareEnabled, bool recheckEnabled)
+    public void UpdateTwoPhases(string scriptsDirectory, FbConnection connection, bool destructiveEnabled, bool dryRun, bool debugCompareEnabled, bool recheckEnabled, bool atomicEnabled)
     {
         Helpers.EnsureOpen(connection);
         _dryRun = dryRun;
@@ -67,17 +67,44 @@ public class FirebirdUpdater
         var targetProcedureDefinitions = BuildTargetProcedureDefinitions(procedureFiles);
         if (_failures.Count > 0) return;
 
-        ExecuteGroup(ScriptGroup.Domain, domainFiles, connection);
-        if (_failures.Count > 0) return;
+        FbTransaction? updateTransaction = null;
+        if (atomicEnabled && !_dryRun)
+        {
+            updateTransaction = BeginWaitTransaction(connection);
+        }
 
-        ExecuteGroup(ScriptGroup.Table, tableFiles, connection);
-        if (_failures.Count > 0) return;
+        ExecuteGroup(ScriptGroup.Domain, domainFiles, connection, transaction: updateTransaction);
+        if (_failures.Count > 0)
+        {
+            if (updateTransaction != null) Rollback(updateTransaction);
+            return;
+        }
 
-        ExecuteGroup(ScriptGroup.Procedure, procedureFiles, connection, procedureStubOnly: true, countAsExecutedFile: false);
-        if (_failures.Count > 0) return;
+        ExecuteGroup(ScriptGroup.Table, tableFiles, connection, transaction: updateTransaction);
+        if (_failures.Count > 0)
+        {
+            if (updateTransaction != null) Rollback(updateTransaction);
+            return;
+        }
 
-        ExecuteGroup(ScriptGroup.Procedure, procedureFiles, connection);
-        if (_failures.Count > 0) return;
+        ExecuteGroup(ScriptGroup.Procedure, procedureFiles, connection, procedureStubOnly: true, countAsExecutedFile: false, transaction: updateTransaction);
+        if (_failures.Count > 0)
+        {
+            if (updateTransaction != null) Rollback(updateTransaction);
+            return;
+        }
+
+        ExecuteGroup(ScriptGroup.Procedure, procedureFiles, connection, transaction: updateTransaction);
+        if (_failures.Count > 0)
+        {
+            if (updateTransaction != null) Rollback(updateTransaction);
+            return;
+        }
+
+        if (updateTransaction != null)
+        {
+            updateTransaction.Commit();
+        }
 
         ApplyDeferredColumnDrops(connection);
         if (_failures.Count > 0) return;
@@ -405,7 +432,8 @@ public class FirebirdUpdater
         IReadOnlyList<string> files,
         FbConnection connection,
         bool procedureStubOnly = false,
-        bool countAsExecutedFile = true)
+        bool countAsExecutedFile = true,
+        FbTransaction? transaction = null)
     {
         if (!_dryRun)
             Console.WriteLine($"Update: {scriptGroup.GetFolderName()} ({files.Count} plików)");
@@ -465,7 +493,9 @@ public class FirebirdUpdater
                             continue;
                         }
 
-                        var alterResult = ExecuteStatementsInSingleTransaction(connection, domainStatements);
+                        var alterResult = transaction == null
+                            ? ExecuteStatementsInSingleTransaction(connection, domainStatements)
+                            : ExecuteStatementsInExistingTransaction(connection, transaction, domainStatements);
                         if (alterResult.Success)
                         {
                             _alteredDomains.Add(domainName + (string.IsNullOrWhiteSpace(desc) ? "" : $" ({desc})"));
@@ -502,7 +532,9 @@ public class FirebirdUpdater
                         }
                     }
 
-                    var domainResult = ExecuteSingleStatementInTransaction(connection, sqlToRun);
+                    var domainResult = transaction == null
+                        ? ExecuteSingleStatementInTransaction(connection, sqlToRun)
+                        : ExecuteSingleStatementInExistingTransaction(connection, transaction, sqlToRun);
                     if (domainResult.Success)
                     {
                         if (isDropDomain) _droppedDomains.Add(domainName);
@@ -548,7 +580,9 @@ public class FirebirdUpdater
                         break;
                     }
 
-                    var dropResult = ExecuteSingleStatementInTransaction(connection, sqlToRun);
+                    var dropResult = transaction == null
+                        ? ExecuteSingleStatementInTransaction(connection, sqlToRun)
+                        : ExecuteSingleStatementInExistingTransaction(connection, transaction, sqlToRun);
                     if (dropResult.Success)
                     {
                         _droppedTables.Add(tableNameFromHeader);
@@ -628,7 +662,9 @@ public class FirebirdUpdater
                         continue;
                     }
 
-                    var alterResult = ExecuteStatementsInSingleTransaction(connection, alterStatements);
+                    var alterResult = transaction == null
+                        ? ExecuteStatementsInSingleTransaction(connection, alterStatements)
+                        : ExecuteStatementsInExistingTransaction(connection, transaction, alterStatements);
                     if (alterResult.Success)
                     {
                         _addedColumns.AddRange(addedThisTable);
@@ -702,7 +738,9 @@ public class FirebirdUpdater
                 break;
             }
 
-            var result = ExecuteSingleStatementInTransaction(connection, sqlToRun);
+            var result = transaction == null
+                ? ExecuteSingleStatementInTransaction(connection, sqlToRun)
+                : ExecuteSingleStatementInExistingTransaction(connection, transaction, sqlToRun);
             if (result.Success)
             {
                 if (!_dryRun)
@@ -1024,6 +1062,46 @@ public class FirebirdUpdater
         }
     }
 
+    private (bool Success, string? ErrorMessage) ExecuteSingleStatementInExistingTransaction(
+        FbConnection connection,
+        FbTransaction transaction,
+        string sqlText)
+    {
+        var sqlToExecute = Helpers.TrimTrailingSqlSemicolon(sqlText);
+        if (string.IsNullOrWhiteSpace(sqlToExecute))
+            return (true, null);
+
+        if (_dryRun)
+        {
+            _dryRunPlanStatements.Add(sqlToExecute);
+            return (true, null);
+        }
+
+        try
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = sqlToExecute;
+            command.CommandType = System.Data.CommandType.Text;
+            command.ExecuteNonQuery();
+            return (true, null);
+        }
+        catch (FbException fbEx)
+        {
+            var message = fbEx.Message;
+            if (message != null && message.Contains("object", StringComparison.OrdinalIgnoreCase) &&
+                message.Contains("in use", StringComparison.OrdinalIgnoreCase))
+            {
+                message += " (obiekt w użyciu – spróbuj ponownie, gdy nie jest wykonywany)";
+            }
+            return (false, message);
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+    }
+
     private (bool Success, string? ErrorMessage) ExecuteStatementsInSingleTransaction(
         FbConnection connection,
         IReadOnlyList<string> statements)
@@ -1066,6 +1144,49 @@ public class FirebirdUpdater
         catch (Exception ex)
         {
             try { transaction.Rollback(); } catch { }
+            return (false, ex.Message);
+        }
+    }
+
+    private (bool Success, string? ErrorMessage) ExecuteStatementsInExistingTransaction(
+        FbConnection connection,
+        FbTransaction transaction,
+        IReadOnlyList<string> statements)
+    {
+        if (_dryRun)
+        {
+            foreach (var statement in statements)
+            {
+                var sql = Helpers.TrimTrailingSqlSemicolon(statement);
+                if (!string.IsNullOrWhiteSpace(sql))
+                    _dryRunPlanStatements.Add(sql);
+            }
+
+            return (true, null);
+        }
+
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        try
+        {
+            foreach (var statement in statements)
+            {
+                var sql = Helpers.TrimTrailingSqlSemicolon(statement);
+                if (string.IsNullOrWhiteSpace(sql))
+                    continue;
+
+                cmd.CommandText = sql;
+                cmd.ExecuteNonQuery();
+            }
+
+            return (true, null);
+        }
+        catch (FbException fbEx)
+        {
+            return (false, fbEx.Message);
+        }
+        catch (Exception ex)
+        {
             return (false, ex.Message);
         }
     }
@@ -2433,5 +2554,10 @@ public class FirebirdUpdater
         };
 
         return connection.BeginTransaction(transactionOptions);
+    }
+
+    private static void Rollback(FbTransaction transaction)
+    {
+        try { transaction.Rollback(); } catch { /* ignore */ }
     }
 }
