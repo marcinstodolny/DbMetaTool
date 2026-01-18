@@ -118,11 +118,12 @@ namespace DbMetaTool
             var firebirdUpdater = new FirebirdUpdater();
             var destructiveEnabled = string.Equals(Environment.GetEnvironmentVariable("FB_DESTRUCTIVE"), "1", StringComparison.Ordinal);
             var dryRun = string.Equals(Environment.GetEnvironmentVariable("FB_DRY_RUN"), "1", StringComparison.Ordinal);
+            var atomicEnabled = string.Equals(Environment.GetEnvironmentVariable("FB_ATOMIC"), "1", StringComparison.Ordinal);
 
             var debugCompareEnabled = string.Equals(Environment.GetEnvironmentVariable("FB_DEBUG_COMPARE"), "1", StringComparison.Ordinal);
             var recheckEnabled = string.Equals(Environment.GetEnvironmentVariable("FB_RECHECK"), "1", StringComparison.Ordinal);
 
-            firebirdUpdater.UpdateTwoPhases(scriptsDirectory, connection, destructiveEnabled, dryRun, debugCompareEnabled, recheckEnabled);
+            firebirdUpdater.UpdateTwoPhases(scriptsDirectory, connection, destructiveEnabled, dryRun, debugCompareEnabled, recheckEnabled, atomicEnabled);
 
             firebirdUpdater.Report();
         }
